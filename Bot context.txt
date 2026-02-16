@@ -1,0 +1,434 @@
+Here’s a **context handoff doc** for a new AI to pick up your project instantly.
+
+---
+
+# Discord Card Turn-Based Bot (C#) → Unity Transfer
+
+## Project goal
+
+Build a **text-based Discord bot** that runs a **turn-based card combat game** (player vs enemy) with:
+
+* **HP combat** + **Money / Basic Income (BI)** economy loop
+* Cards that are **data + effects**, with reusable effect templates
+* Code structured so the **game engine is pure C#** and can later be reused in **Unity** (swap Discord I/O for Unity UI)
+
+---
+
+# Current repo / solution setup
+
+Repo root: `GDC-Gambling-bot`
+
+Solution:
+
+* Uses **CardBot.slnx** (not .sln)
+* Projects:
+
+  * `Game.Core` (class library): all game logic
+  * `Discord.Bot` (console app): Discord.Net wrapper + command handling
+
+CLI used:
+
+```powershell
+dotnet sln .\CardBot.slnx add .\Game.Core\Game.Core.csproj
+dotnet sln .\CardBot.slnx add .\Discord.Bot\Discord.Bot.csproj
+dotnet sln .\CardBot.slnx add .\Discord.Bot\Discord.Bot.csproj
+dotnet add .\Discord.Bot\Discord.Bot.csproj reference .\Game.Core\Game.Core.csproj
+```
+
+Build status:
+
+* `dotnet build` succeeds (warnings about non-nullable fields exist, not fatal)
+
+---
+
+# Discord bot token / env
+
+Token stored as **User environment variable**:
+
+* Key: `BOT_TOKEN`
+* Verified via:
+
+  * `$env:BOT_TOKEN` (was empty in current PowerShell session)
+  * `[System.Environment]::GetEnvironmentVariable("BOT_TOKEN","User")` (returned correctly)
+
+Important note:
+
+* If bot prints `BOT_TOKEN exists? false`, it’s usually because:
+
+  * the program reads **Process env**, but PowerShell session wasn’t restarted after `setx`, or
+  * code reads `EnvironmentVariableTarget.Process` implicitly (default `GetEnvironmentVariable("BOT_TOKEN")` uses process), so user-level token may not be present in that session.
+* Fix: restart terminal OR set for session:
+
+  * `$env:BOT_TOKEN="..."`
+
+---
+
+# Phase plan chosen
+
+User chose **Phase 1 first** = implement the “timing heavy” cards / core systems cleanly before expanding deck/AI.
+
+---
+
+# Commands supported (current bot design)
+
+These are the intended Discord text commands (prefix `!`):
+
+* `!help`
+  Shows command list
+* `!newgame`
+  Creates a new game session for the channel (usually 1 game per channel for now)
+* `!status`
+  Shows player/enemy HP, money, BI, income multiplier, turn number, key stacks
+* `!hand`
+  Shows current hand with indices and each card’s **final cost** (after discounts)
+* `!play <index>`
+  Plays a card from the hand by index
+* `!end`
+  Ends player turn → enemy attacks → end-of-round payout → investment tick → duration tick → draw 1 → next turn
+
+(If not all are currently wired in Discord.Bot yet, that’s the intended interface and structure.)
+
+---
+
+# Core game rules / loop (engine logic)
+
+## Entities
+
+* `Combatant`
+
+  * `Attack`
+  * `MaxHealth`
+  * `CurrentHealth`
+  * `TakeDamage(amount)` and `Heal(amount)`
+* `GameState`
+
+  * `BasicIncome` (BI)
+  * `Money`
+  * `IncomeMultiplier` (affects next payout only; resets after payout)
+  * Status dictionary: `Dictionary<string, StatusInstance>`
+
+    * stacks + duration (-1 = permanent)
+  * Helpers:
+
+    * `GetStacks(id)`
+    * `AddStacks(id, add, durationTurns)`
+    * `RemoveStatus(id)`
+    * `TickDurations()`
+    * `IncomeThisRound()` = round(BI * IncomeMultiplier)
+    * `Rand01()` / `RandRange()`
+
+## Turn structure
+
+### Player action
+
+* Player can play cards as long as they can afford them (Money-based cost)
+* Playing a card:
+
+  * compute `FinalCost(card)` using modifiers (currently Buy Low)
+  * pay cost
+  * remove from hand → discard
+  * run all card effects that trigger on `OnPlay`
+  * check win (enemy dead)
+
+### End turn sequence
+
+When `EndTurn()` is called:
+
+1. Enemy attacks (base `Enemy.Attack`)
+2. Trigger defense pipeline:
+
+   * create `EffectContext` with `PendingDamage = incoming`
+   * `_runner.FireTrigger(OnBeforeTakeDamage, ctx)` may reduce/modify damage
+3. Apply damage to player
+4. Check loss (player dead)
+5. End of round economy:
+
+   * income payout: `Money += IncomeThisRound()`
+   * reset `IncomeMultiplier = 1`
+6. Investment tick:
+
+   * `_runner.FireTrigger(OnRoundEnd, ctx)`
+     (pays out things like Bank/SellHigh/Stocks drift, etc)
+7. Turn-end triggers (if implemented): `_runner.FireTrigger(OnTurnEnd, ctx)`
+8. Tick durations: `State.TickDurations()`
+9. Start next turn:
+
+   * `TurnNumber++`
+   * draw 1 card
+
+## Deck/hand/discard
+
+* Deck implemented via:
+
+  * `_deck: Queue<CardDef>`
+  * `_discard: List<CardDef>`
+  * `Hand: List<CardDef>`
+* Draw rules:
+
+  * Start game draw 5
+  * Each new turn draw 1
+  * When deck empty: shuffle discard back into deck
+
+---
+
+# Effects system design (what exists now)
+
+## Interface
+
+```csharp
+namespace Game.Core.Effects
+{
+    public interface IEffect
+    {
+        EffectTrigger Trigger { get; }
+        string Apply(EffectContext ctx);
+    }
+}
+```
+
+## Trigger enum (minimum)
+
+* `OnPlay`
+* `OnRoundEnd`
+* `OnBeforeTakeDamage`
+* (Optionally) `OnTurnEnd`, `OnDamageTaken`, etc depending on Phase 1 expansion
+
+## Context object
+
+* `EffectContext(User, Target, State)`
+* `PendingDamage` used for damage modifiers (defense/offense)
+
+## Implementation namespace decision
+
+Effects currently live in:
+
+* `Game.Core.Effects.Impl`
+
+There were duplicate ideas earlier (`Effects/Implementations`), but final decision:
+
+* **Keep `Effects/Impl`** and remove duplicates
+* Ensure all code uses:
+
+  * `using Game.Core.Effects.Impl;`
+
+---
+
+# Current effect templates (known)
+
+In `Game.Core.Effects.Impl` you now have:
+
+* `AddStacksEffect(id, addStacks, durationTurns)`
+* `AddMoneyFromBIEffect(percent)`
+* `AddBasicIncomeEffect(amount)`
+* `SetIncomeMultiplierEffect(mult)`
+* `DealDamageEffect(amount)` (assumes ctx.Target exists)
+* `HealEffect(amount)`
+* `BuyLowStackEffect()` (adds stack up to max 2)
+* `SellHighStackEffect()` (adds stack up to max 2)
+* `SocialPressureEffect()` (adds SOCIAL stack then deals `10 + 5*stacks`)
+
+Important: payout effects are NOT implemented as separate `IEffect` classes; instead:
+
+* “passive payout” is handled by `EffectRunner` reading stacks on triggers like `OnRoundEnd`
+
+---
+
+# Status / stack IDs (EffectIds)
+
+There is a central static ID list (e.g. `EffectIds`), used as string keys in GameState:
+
+* `BANK_ACCOUNT`
+* `BUY_LOW`
+* `SELL_HIGH`
+* `SOCIAL_PRESSURE`
+* others may be added for Phase 1: `HEDGING_SHIELD`, `ENCHANT_NEXT`, `DISCREDIT_READY`, `LOAN_SHARK_DEBT`, `STOCKS_BONDS`, etc
+
+---
+
+# Cost modifier logic (Buy Low)
+
+Final cost formula in `GameEngine.FinalCost(card)`:
+
+* `stacks = min(State.GetStacks(BUY_LOW), 2)`
+* multiplier = `1 - 0.10 * stacks`
+* finalCost = round(baseCost * multiplier), clamped >= 0
+
+This makes Buy Low a **rule modifier** rather than a payout effect.
+
+---
+
+# Card model + library
+
+## `CardDef`
+
+Fields:
+
+* `Id`, `Name`, `Description`, `BaseCost`
+* `List<IEffect> Effects`
+
+## `CardLibrary`
+
+There was confusion about “BuildStarterDeck” name; in this codebase it’s:
+
+* `CardLibrary.StarterDeck()`
+
+The deck returns a `List<CardDef>`.
+
+Cards are created as factories like:
+
+* `CreateTrojan()`
+* `CreateTherapy()`
+* `CreateSocialPressure()`
+* `CreateBuyLow()`
+* `CreateSellHigh()`
+* `CreateBankAccount()`
+
+Notes:
+
+* Bank/SellHigh passive payout happens in `EffectRunner.OnRoundEnd` by reading stacks.
+
+---
+
+# Engine status
+
+`GameEngine` currently:
+
+* compiles
+* runs the core loop
+* had a bug in older pasted version: referenced `_effects` instead of `_runner`
+
+  * fix is: always use `_runner`
+
+Warnings from build:
+
+* non-nullable fields/properties not initialized in constructors (CS8618)
+
+  * not urgent; can later be cleaned by:
+
+    * making `_engine` nullable, or
+    * initializing in constructor, or
+    * using `required` (C# 11+) appropriately
+
+---
+
+# What the next AI should do next
+
+## Immediate next step: “Phase 1” features (timing-heavy cards)
+
+Add cards/effects that require triggers beyond OnPlay/OnRoundEnd:
+
+1. **Hedging**
+
+   * OnPlay: `IncomeMultiplier = 0.5` for next payout
+   * Add a 1-turn “shield” stack/status
+   * OnBeforeTakeDamage: if shield active → reduce PendingDamage by 50%
+   * duration ticks remove shield after 1 turn
+
+2. **Enchantment**
+
+   * OnPlay: add status “ENCHANT_NEXT” duration 1
+   * OnBeforeDealDamage (new trigger) or handled inside DealDamage pipeline:
+
+     * if ENCHANT_NEXT active, multiply outgoing damage by 1.5 then consume
+
+3. **Discredit**
+
+   * OnPlay: add status “DISCREDIT_READY” duration 1
+   * OnDamageTaken: if active, reflect 50% to attacker and consume
+   * OnTurnEnd: if still active when expiring, deal 10 self-damage
+
+4. **Loan Shark**
+
+   * OnPlay: `Money += BI * L` (ex L=1.0)
+   * Add debt marker with duration 2 (stacks = # loans)
+   * OnTurnEnd: when debt about to expire, require repayment with interest:
+
+     * repay = round(BI * L * (1+r) * stacks)
+     * if can’t pay: convert missing to HP loss
+     * 5% catastrophe: lose 20% money + extra HP penalty
+
+5. **Stocks & Bonds**
+
+   * OnPlay add “STOCKS_BONDS” stack
+   * OnRoundEnd: per stack, apply `Money += round(Money * rand(-0.2, +0.2))`
+
+### System upgrade needed for Phase 1
+
+`EffectRunner` must support more triggers:
+
+* `OnTurnEnd`
+* `OnDamageTaken`
+* (optional but clean) `OnBeforeDealDamage`
+
+And the engine must call them at the right times.
+
+---
+
+# File organization (recommended “final” structure)
+
+Keep engine pure and Unity-portable:
+
+## Game.Core (Unity-friendly)
+
+* `Engine/`
+
+  * `GameEngine.cs`
+* `Cards/`
+
+  * `CardDef.cs`
+  * `CardLibrary.cs`
+* `Models/`
+
+  * `Combatant.cs`
+  * `GameState.cs`
+  * `StatusInstance.cs`
+* `Effects/`
+
+  * `IEffect.cs`
+  * `EffectContext.cs`
+  * `EffectTrigger.cs`
+  * `EffectIds.cs`
+  * `EffectRunner.cs`
+  * `Impl/`
+
+    * `InvestmentEffects.cs` (AddStacks, BI money, BuyLow, SellHigh, etc)
+    * `CombatEffects.cs` (DealDamage, Heal, SocialPressure, etc)
+    * `Phase1Effects.cs` (Hedging/Enchantment/Discredit/Loan/Stocks)
+
+## Discord.Bot (Discord-specific, replace later in Unity)
+
+* `Program.cs`
+* Discord client + command router file(s)
+* `Session/` manager:
+
+  * maps channel → `GameSession`
+* `GameSession` wraps GameEngine and formats strings for Discord output
+
+---
+
+# Design intent for Unity transfer
+
+* Keep **Game.Core** free of:
+
+  * Discord types
+  * Console I/O
+  * any Unity-specific API
+* Unity later will:
+
+  * reuse `GameEngine`, `CardDef`, `GameState`, effects
+  * replace `GameSession string formatting` with UI
+  * optionally replace `CardLibrary` hardcode with ScriptableObjects / JSON
+
+---
+
+# Quick “gotchas” for the next AI
+
+* Don’t create new namespaces like `Implementations` if we’re already using `Impl`
+* Avoid duplicate classes with same names across namespaces
+* Ensure `CardLibrary.cs` has correct `using Game.Core.Effects.Impl;`
+* Avoid calling nonexistent `_effects` field in `GameEngine` (use `_runner`)
+* Ensure BOT_TOKEN is available in the current terminal session (restart terminal after setx)
+
+---
+
+If you want, paste your current `EffectRunner.cs` and `CardLibrary.cs`, and I’ll tell you exactly what Phase 1 changes to make first (minimal edits, no refactor explosion).

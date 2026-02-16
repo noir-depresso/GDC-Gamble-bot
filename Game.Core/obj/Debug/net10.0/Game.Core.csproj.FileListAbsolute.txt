@@ -1,0 +1,11 @@
+C:\Users\ryan\Desktop\ryan\0Personal Projects\GDC-Gambling-bot\Game.Core\obj\Debug\net10.0\Game.Core.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\ryan\Desktop\ryan\0Personal Projects\GDC-Gambling-bot\Game.Core\obj\Debug\net10.0\Game.Core.AssemblyInfoInputs.cache
+C:\Users\ryan\Desktop\ryan\0Personal Projects\GDC-Gambling-bot\Game.Core\obj\Debug\net10.0\Game.Core.AssemblyInfo.cs
+C:\Users\ryan\Desktop\ryan\0Personal Projects\GDC-Gambling-bot\Game.Core\obj\Debug\net10.0\Game.Core.csproj.CoreCompileInputs.cache
+C:\Users\ryan\Desktop\ryan\0Personal Projects\GDC-Gambling-bot\Game.Core\bin\Debug\net10.0\Game.Core.deps.json
+C:\Users\ryan\Desktop\ryan\0Personal Projects\GDC-Gambling-bot\Game.Core\bin\Debug\net10.0\Game.Core.dll
+C:\Users\ryan\Desktop\ryan\0Personal Projects\GDC-Gambling-bot\Game.Core\bin\Debug\net10.0\Game.Core.pdb
+C:\Users\ryan\Desktop\ryan\0Personal Projects\GDC-Gambling-bot\Game.Core\obj\Debug\net10.0\Game.Core.dll
+C:\Users\ryan\Desktop\ryan\0Personal Projects\GDC-Gambling-bot\Game.Core\obj\Debug\net10.0\refint\Game.Core.dll
+C:\Users\ryan\Desktop\ryan\0Personal Projects\GDC-Gambling-bot\Game.Core\obj\Debug\net10.0\Game.Core.pdb
+C:\Users\ryan\Desktop\ryan\0Personal Projects\GDC-Gambling-bot\Game.Core\obj\Debug\net10.0\ref\Game.Core.dll

@@ -1,0 +1,47 @@
+Investment: *ALL % IN TERMS OF “BASIC INCOME”
+Bank account: increases 5% of basic income gained every round (stacks)
+Logic: get a bunch of these on the sides. Safe and easy money!
+Loan Shark: Get money that in two turns you have to pay high back interest or lose health. A 5% chance to permanently lose 20% of money and also health
+Logic: play the cards now or later?
+Crypto: gives 50% of base income
+Very costly card but also very rewarding
+Stocks and bonds: gained -20% to 20% of the money per round (infinite stacks)
+Buy low: All cards can be played at a lower cost (up to 2 stacks)
+Sell high: more money gained per turn (up to 2 stack)
+Real Estate: increases BASE INCOME depending on the card
+
+Medicate:
+“Raan”: After 2-3 turns be able to pick up an extra card
+The Wire: If the enemy is defeated by this card gain an extra card after combat
+Persuasion: decreased attack for enemy cards OR increase attack for player cards
+Online targeting: able to do a special attack only after the enemy has X DoT/rumor stacks
+D-dos: see opponent cards OR see probability
+Coin flip: flip a coin, if heads do double damage, if tails this attack does 50% less
+Hedging: blocks 50% of incoming damage next turn but lowers income by 50% as well
+The Rich gets richer: exchanges 50% health as 100% of total money
+Neural-networking: heal of health by
+Therapy: heal 30 health
+Prosthesis: heal 20% of health in exchange of losing 10% of permanent health (example: health is 45/100, now its 55/90)
+Wane and Wax: steals health depending on the damage you dealt
+Firewall: steals health depending on the damage enemy dealt
+Chaos: reshuffles hand
+ScapeGoat: temporarily blocks a card type of your choice for you and your opponent
+Enchantment: increases the damage dealt next turn
+Discredit: reflects 50% of an enemy’s attack if the card you used this on is attacked, deals 10 damage to yourself otherwise
+Guard Down: decreases enemy attack
+Release the Files: if the player reaches 20% health or below and this card is played, you do twice the damage for the next turn
+
+Bruiser: 
+Hacker V: decreases opponent basic income by 30% permanently.
+Trojan Malware: deals damage
+Social pressure: does more damage with stacks
+Expose: exchange the card’s health directly for damage
+
+
+Special: (TBD)
+Roulette: a chance based card where you have a chance to get these when using the skill:
+Damage to self
+heal
+Damage to opponent
+Eye for an eye: copy the opponent’s attack 
+Slick Talker: play a card for free when damage dealt is more than 30% of enemy health before the 5th turn

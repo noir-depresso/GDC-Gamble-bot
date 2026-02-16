@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="Discord.Bot/Discord.Bot.csproj" />
+  <Project Path="Game.Core/Game.Core.csproj" />
+</Solution>
