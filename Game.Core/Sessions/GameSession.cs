@@ -1,4 +1,6 @@
+using System.Linq;
 using System.Text;
+using Game.Core.Cards;
 using Game.Core.Engine;
 using Game.Core.Effects;
 using Game.Core.Models;
@@ -10,11 +12,30 @@ namespace Game.Core.Sessions
         public ulong ChannelId { get; }
         public ulong OwnerUserId { get; private set; }
 
-        public bool HasGame => _engine != null && !_engine.IsOver;
+        public bool HasGame => _engine != null;
+        public bool InCombat => _engine != null && !_engine.State.IsOver;
+        public bool IsInitialized => _engine != null;
 
-        private GameEngine _engine;
+        private GameEngine? _engine;
 
-        public GameSession(ulong channelId) => ChannelId = channelId;
+        public GameSession(ulong channelId)
+        {
+            ChannelId = channelId;
+        }
+
+        public static GameSession Restore(ulong channelId, ulong ownerUserId, GameState state)
+        {
+            var session = new GameSession(channelId)
+            {
+                OwnerUserId = ownerUserId,
+                _engine = new GameEngine()
+            };
+
+            session._engine.LoadState(state);
+            return session;
+        }
+
+        public GameState? GetStateSnapshot() => _engine?.State;
 
         public void StartNewGame(ulong ownerUserId)
         {
@@ -25,72 +46,79 @@ namespace Game.Core.Sessions
 
         public string IntroText() =>
             "**New game started.**\n" +
-            "Use `!hand`, `!play <index>`, `!end`, `!status`.";
+            "Use `!bet <amount>`, `!choose <choiceId> <option>`, `!useitem <index>`, `!inspect <index>`, `!hand`, `!play <index>`, `!end`, `!job <cleaning|fetch|delivery|snake|coinflip>`, `!nextcombat`, `!status`.";
 
         public string StatusText()
         {
-             if (_engine == null) return "No game.";
+            if (_engine == null) return "No game.";
 
-            var p = _engine.Player;
-            var e = _engine.Enemy;
-            var s = _engine.State;
+            var state = _engine.State;
+            var p = state.Player;
+            var e = state.Enemy;
 
-            int bank = s.GetStacks(EffectIds.BANK_ACCOUNT);
-            int buyLow = s.GetStacks(EffectIds.BUY_LOW);
-            int sellHigh = s.GetStacks(EffectIds.SELL_HIGH);
-            int social = s.GetStacks(EffectIds.SOCIAL_PRESSURE);
+            int bank = state.GetStacks(EffectIds.BANK_ACCOUNT);
+            int buyLow = state.GetStacks(EffectIds.BUY_LOW);
+            int sellHigh = state.GetStacks(EffectIds.SELL_HIGH);
+            int social = state.GetStacks(EffectIds.SOCIAL_PRESSURE);
 
-            // --- Guaranteed next-round gains ---
-            int incomeNext = s.IncomeThisRound(); // BI * multiplier
-            int bankGain = (int)System.MathF.Round(s.BasicIncome * 0.05f * bank);
-            int sellGain = (int)System.MathF.Round(s.BasicIncome * 0.10f * sellHigh); // match your runner percent
-            int guaranteedGain = incomeNext + bankGain + sellGain;
-
-            // --- Next attack multiplier preview (simple version) ---
-            // If you later add enchant/double-damage statuses, check them here.
-            float nextAttackMult = 1f;
-            string multNotes = "None";
-
-            // Example IDs you might add later:
-            // if (s.GetStacks(EffectIds.ENCHANT_NEXT) > 0) { nextAttackMult *= 1.5f; multNotes = "✨ Enchant"; }
-            // if (s.GetStacks(EffectIds.DOUBLE_DAMAGE_NEXT) > 0) { nextAttackMult *= 2f; multNotes = "🔥 Double"; }
-
-            // Simple HP bars (10 blocks)
             string Bar(int cur, int max)
             {
                 int filled = (int)System.MathF.Round(10f * cur / System.MathF.Max(1, max));
                 filled = System.Math.Clamp(filled, 0, 10);
-                return new string('█', filled) + new string('░', 10 - filled);
+                return new string('#', filled) + new string('-', 10 - filled);
             }
 
             var sb = new StringBuilder();
-
-            sb.AppendLine("**📌 STATUS**");
-            sb.AppendLine($"🧍 **You:** `{p.CurrentHealth}/{p.MaxHealth}`  `{Bar(p.CurrentHealth, p.MaxHealth)}`");
-            sb.AppendLine($"🤖 **Enemy:** `{e.CurrentHealth}/{e.MaxHealth}` `{Bar(e.CurrentHealth, e.MaxHealth)}`");
+            sb.AppendLine("**STATUS**");
+            sb.AppendLine($"Phase: **{state.Phase}** Turn: **{state.TurnNumber}** Character: **{state.CharacterClass}**");
+            sb.AppendLine($"You: `{p.CurrentHealth}/{p.MaxHealth}` `{Bar(p.CurrentHealth, p.MaxHealth)}`");
+            sb.AppendLine($"Enemy: `{e.CurrentHealth}/{e.MaxHealth}` `{Bar(e.CurrentHealth, e.MaxHealth)}`");
             sb.AppendLine();
 
-            sb.AppendLine("**💰 ECONOMY**");
-            sb.AppendLine($"💵 Money: **{s.Money}**");
-            sb.AppendLine($"🏦 Basic Income (BI): **{s.BasicIncome}**");
-            sb.AppendLine($"📈 Income Multiplier: **x{s.IncomeMultiplier:0.00}** (applies to next payout only)");
+            sb.AppendLine("**ECONOMY**");
+            sb.AppendLine($"Money: **{state.Money}**");
+            sb.AppendLine($"Bits: **{state.Bits}**");
+            sb.AppendLine($"Basic Income: **{state.BasicIncome}**");
+            sb.AppendLine($"Bits/turn: **{state.BitsPerTurn}**");
+            sb.AppendLine($"Bet: **{state.BetAmount}**");
+            sb.AppendLine($"Debt: **{(state.InDebt ? state.DebtAmount : 0)}**");
+            sb.AppendLine($"Job fatigue: **{state.JobFatigue}** (jobs completed: {state.JobsCompleted})");
+            if (!string.IsNullOrWhiteSpace(state.LastJobType))
+                sb.AppendLine($"Last job: **{state.LastJobType}**");
+            if (state.BlockedCardType != null)
+                sb.AppendLine($"Blocked type: **{state.BlockedCardType}** ({state.BlockedCardTypeTurns} turns)");
             sb.AppendLine();
 
-            sb.AppendLine("**🔮 NEXT ROUND (GUARANTEED)**");
-            sb.AppendLine($"✅ Income payout: `+{incomeNext}`");
-            sb.AppendLine($"✅ Bank Account: `+{bankGain}` (5% BI × {bank})");
-            sb.AppendLine($"✅ Sell High: `+{sellGain}` (10% BI × {sellHigh})");
-            sb.AppendLine($"➡️ **Guaranteed total gain:** **+{guaranteedGain}**");
-            sb.AppendLine($"🧾 **Money after next round (est):** **{s.Money + guaranteedGain}**");
-            sb.AppendLine();
+            if (state.PendingChoice != null)
+            {
+                sb.AppendLine("**PENDING CHOICE**");
+                sb.AppendLine($"ID: `{state.PendingChoice.ChoiceId}` Type: `{state.PendingChoice.ChoiceType}`");
+                sb.AppendLine($"Prompt: {state.PendingChoice.Prompt}");
+                sb.AppendLine($"Options: {string.Join(", ", state.PendingChoice.Options)}");
+                sb.AppendLine();
+            }
 
-            sb.AppendLine("**⚔️ COMBAT READOUT**");
-            sb.AppendLine($"🗓️ Turn: **{_engine.TurnNumber}**");
-            sb.AppendLine($"🎯 Next attack multiplier: **x{nextAttackMult:0.00}** (`{multNotes}`)");
-            sb.AppendLine();
+            if (state.GeneratedItems.Count > 0)
+            {
+                sb.AppendLine("**GENERATED ITEMS**");
+                for (int i = 0; i < state.GeneratedItems.Count; i++)
+                    sb.AppendLine($"`{i}` - {state.GeneratedItems[i]}");
+                sb.AppendLine();
+            }
 
-            sb.AppendLine("**📚 STACKS**");
-            sb.AppendLine($"🏦 Bank: `{bank}`   📉 Buy Low: `{buyLow}`   📈 Sell High: `{sellHigh}`   🗣️ Social: `{social}`");
+            sb.AppendLine("**STACKS**");
+            sb.AppendLine($"Bank: `{bank}` Buy Low: `{buyLow}` Sell High: `{sellHigh}` Social: `{social}`");
+
+            if (state.Statuses.Count > 0)
+            {
+                sb.AppendLine();
+                sb.AppendLine("**ACTIVE STATUSES**");
+                foreach (var s in state.Statuses.Values.OrderBy(s => s.Id))
+                {
+                    var duration = s.DurationTurns < 0 ? "perm" : s.DurationTurns.ToString();
+                    sb.AppendLine($"`{s.Id}` stacks={s.Stacks} turns={duration}");
+                }
+            }
 
             return sb.ToString();
         }
@@ -99,30 +127,108 @@ namespace Game.Core.Sessions
         {
             if (_engine == null) return "No game.";
 
+            var state = _engine.State;
             var sb = new StringBuilder();
             sb.AppendLine("**Hand**");
-            for (int i = 0; i < _engine.Hand.Count; i++)
+
+            for (int i = 0; i < state.HandCardIds.Count; i++)
             {
-                var c = _engine.Hand[i];
-                int cost = _engine.FinalCost(c);
-                sb.AppendLine($"`{i}` - {c.Name} (Cost: {cost})");
-                sb.AppendLine($"     {c.Description}");
+                var card = CardLibrary.GetById(state.HandCardIds[i]);
+                int cost = _engine.FinalCost(state, card);
+                sb.AppendLine($"`{i}` - {card.Name} [{card.Type}] (Cost: {cost}b)");
+                sb.AppendLine($"     {card.Description}");
             }
+
             return sb.ToString();
+        }
+
+        public string Inspect(int index)
+        {
+            if (_engine == null) return "No game.";
+
+            var state = _engine.State;
+            if (index < 0 || index >= state.HandCardIds.Count)
+                return "Invalid card index.";
+
+            var card = CardLibrary.GetById(state.HandCardIds[index]);
+            int finalCost = _engine.FinalCost(state, card);
+
+            var sb = new StringBuilder();
+            sb.AppendLine("**CARD INSPECT**");
+            sb.AppendLine($"Name: **{card.Name}**");
+            sb.AppendLine($"Id: `{card.Id}`");
+            sb.AppendLine($"Type: `{card.Type}`");
+            sb.AppendLine($"Base cost: `{card.BaseCostBits}` bits");
+            sb.AppendLine($"Final cost now: `{finalCost}` bits");
+            sb.AppendLine($"Description: {card.Description}");
+            sb.AppendLine($"Effects: {card.Effects.Count}");
+
+            return sb.ToString();
+        }
+
+        public string Bet(int amount)
+        {
+            if (_engine == null) return "No game.";
+            var update = _engine.Apply(new PlaceBetAction(amount));
+            return FormatUpdate(update);
+        }
+
+        public string StartNextCombat()
+        {
+            if (_engine == null) return "No game.";
+            var update = _engine.Apply(new StartNextCombatAction());
+            return FormatUpdate(update);
+        }
+
+        public string WorkJob(string jobType)
+        {
+            if (_engine == null) return "No game.";
+            var update = _engine.Apply(new WorkJobAction(jobType));
+            return FormatUpdate(update);
+        }
+
+        public string SelectCharacter(CharacterClass characterClass)
+        {
+            if (_engine == null) return "No game.";
+            var update = _engine.Apply(new SelectCharacterAction(characterClass));
+            return FormatUpdate(update);
+        }
+
+        public string Choose(string choiceId, string optionId)
+        {
+            if (_engine == null) return "No game.";
+            var update = _engine.Apply(new ChooseOptionAction(choiceId, optionId));
+            return FormatUpdate(update);
+        }
+
+        public string UseItem(int itemIndex)
+        {
+            if (_engine == null) return "No game.";
+            var update = _engine.Apply(new UseGeneratedItemAction(itemIndex));
+            return FormatUpdate(update);
         }
 
         public string Play(int index)
         {
             if (_engine == null) return "No game.";
-            var result = _engine.PlayCard(index);
-            return result + (HasGame ? "" : "\n(Game over)");
+            var update = _engine.Apply(new PlayCardAction(index));
+            return FormatUpdate(update) + (InCombat ? "" : "\n(Combat ended)");
         }
 
         public string EndTurn()
         {
             if (_engine == null) return "No game.";
-            var result = _engine.EndTurn();
-            return result + (HasGame ? "" : "\n(Game over)");
+            var update = _engine.Apply(new EndTurnAction());
+            return FormatUpdate(update) + (InCombat ? "" : "\n(Combat ended)");
+        }
+
+        private static string FormatUpdate(GameUpdate update)
+        {
+            if (!update.Success)
+                return string.Join("\n", update.Errors);
+
+            return string.Join("\n", update.Messages.Where(m => m != null));
         }
     }
 }
+

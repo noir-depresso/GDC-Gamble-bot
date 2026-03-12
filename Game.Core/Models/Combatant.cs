@@ -2,13 +2,17 @@ namespace Game.Core.Models
 {
     public class Combatant
     {
-        public string Name { get; }
+        public string Name { get; set; } = string.Empty;
         public int Attack { get; set; }
         public int MaxHealth { get; set; }
         public int CurrentHealth { get; set; }
-        public bool IsEnemy { get; }
+        public bool IsEnemy { get; set; }
 
         public bool IsDead => CurrentHealth <= 0;
+
+        public Combatant()
+        {
+        }
 
         public Combatant(string name, int attack, int maxHealth, bool isEnemy)
         {

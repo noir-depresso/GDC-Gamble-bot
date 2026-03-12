@@ -1,10 +1,9 @@
 using System;
-using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 using Discord;
 using Discord.WebSocket;
-using Game.Core.Engine;       // from Game.Core
-using Game.Core.Sessions;     // from Game.Core
+using DiscordBot.Application;
 
 namespace DiscordBot.Discord
 {
@@ -12,13 +11,12 @@ namespace DiscordBot.Discord
     {
         private readonly BotConfig _config;
         private readonly DiscordSocketClient _client;
+        private readonly GameService _gameService;
 
-        // One game per channel (easy demo).
-        private readonly Dictionary<ulong, GameSession> _sessions = new();
-
-        public BotClient(BotConfig config)
+        public BotClient(BotConfig config, GameService gameService)
         {
             _config = config;
+            _gameService = gameService;
 
             var socketConfig = new DiscordSocketConfig
             {
@@ -29,10 +27,10 @@ namespace DiscordBot.Discord
             };
 
             _client = new DiscordSocketClient(socketConfig);
-
             _client.Log += msg => { Console.WriteLine(msg.ToString()); return Task.CompletedTask; };
-            _client.Ready += () => { Console.WriteLine($"Online as {_client.CurrentUser}"); return Task.CompletedTask; };
+            _client.Ready += OnReadyAsync;
             _client.MessageReceived += OnMessageReceivedAsync;
+            _client.SlashCommandExecuted += OnSlashCommandExecutedAsync;
         }
 
         public async Task StartAsync()
@@ -41,114 +39,112 @@ namespace DiscordBot.Discord
             await _client.StartAsync();
         }
 
+        private async Task OnReadyAsync()
+        {
+            Console.WriteLine($"Online as {_client.CurrentUser}");
+            await RegisterCommandsAsync();
+        }
+
+        private async Task RegisterCommandsAsync()
+        {
+            var game = new SlashCommandBuilder()
+                .WithName("game")
+                .WithDescription("Game commands")
+                .AddOption(new SlashCommandOptionBuilder().WithName("create").WithDescription("Create/start a new game").WithType(ApplicationCommandOptionType.SubCommand))
+                .AddOption(new SlashCommandOptionBuilder().WithName("kit").WithDescription("Select character kit").WithType(ApplicationCommandOptionType.SubCommand)
+                    .AddOption("name", ApplicationCommandOptionType.String, "thief or politician", isRequired: true))
+                .AddOption(new SlashCommandOptionBuilder().WithName("bet").WithDescription("Place pre-fight bet").WithType(ApplicationCommandOptionType.SubCommand)
+                    .AddOption("amount", ApplicationCommandOptionType.Integer, "Bet amount (1-1000)", isRequired: true))
+                .AddOption(new SlashCommandOptionBuilder().WithName("choose").WithDescription("Resolve pending choice").WithType(ApplicationCommandOptionType.SubCommand)
+                    .AddOption("choice_id", ApplicationCommandOptionType.String, "Choice ID", isRequired: true)
+                    .AddOption("option", ApplicationCommandOptionType.String, "Option value", isRequired: true))
+                .AddOption(new SlashCommandOptionBuilder().WithName("useitem").WithDescription("Use generated item").WithType(ApplicationCommandOptionType.SubCommand)
+                    .AddOption("index", ApplicationCommandOptionType.Integer, "Item index", isRequired: true))
+                .AddOption(new SlashCommandOptionBuilder().WithName("inspect").WithDescription("Inspect card in hand").WithType(ApplicationCommandOptionType.SubCommand)
+                    .AddOption("index", ApplicationCommandOptionType.Integer, "Card index in hand", isRequired: true))
+                .AddOption(new SlashCommandOptionBuilder().WithName("job").WithDescription("Run between-combat side job").WithType(ApplicationCommandOptionType.SubCommand)
+                    .AddOption("name", ApplicationCommandOptionType.String, "cleaning, fetch, delivery, snake, or coinflip", isRequired: true))
+                .AddOption(new SlashCommandOptionBuilder().WithName("nextcombat").WithDescription("Start next combat").WithType(ApplicationCommandOptionType.SubCommand))
+                .AddOption(new SlashCommandOptionBuilder().WithName("status").WithDescription("Show game status").WithType(ApplicationCommandOptionType.SubCommand))
+                .AddOption(new SlashCommandOptionBuilder().WithName("hand").WithDescription("Show your hand").WithType(ApplicationCommandOptionType.SubCommand))
+                .AddOption(new SlashCommandOptionBuilder().WithName("play").WithDescription("Play a card by hand index").WithType(ApplicationCommandOptionType.SubCommand)
+                    .AddOption("index", ApplicationCommandOptionType.Integer, "Card index in hand", isRequired: true))
+                .AddOption(new SlashCommandOptionBuilder().WithName("end").WithDescription("End your turn").WithType(ApplicationCommandOptionType.SubCommand))
+                .AddOption(new SlashCommandOptionBuilder().WithName("help").WithDescription("Show help").WithType(ApplicationCommandOptionType.SubCommand));
+
+            await _client.BulkOverwriteGlobalApplicationCommandsAsync(new ApplicationCommandProperties[] { game.Build() });
+        }
+
         private async Task OnMessageReceivedAsync(SocketMessage rawMsg)
         {
             if (rawMsg is not SocketUserMessage msg) return;
             if (msg.Author.IsBot) return;
-            if (!msg.Content.StartsWith(_config.Prefix)) return;
 
-            string content = msg.Content.Substring(_config.Prefix.Length).Trim();
-            if (string.IsNullOrWhiteSpace(content)) return;
+            if (!CommandParser.TryParse(msg.Content, _config.Prefix, out string command, out string[] args))
+                return;
 
-            string[] parts = content.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-            string cmd = parts[0].ToLowerInvariant();
+            var result = await _gameService.HandleCommandAsync(msg.Channel.Id, msg.Author.Id, command, args, msg.Id.ToString());
+            foreach (var line in result.Messages.Where(m => !string.IsNullOrWhiteSpace(m)))
+                await msg.Channel.SendMessageAsync(line);
+        }
 
-            ulong channelId = msg.Channel.Id;
-
-            _sessions.TryGetValue(channelId, out var session);
-
-            // --- simple commands ---
-            if (cmd == "ping")
+        private async Task OnSlashCommandExecutedAsync(SocketSlashCommand cmd)
+        {
+            if (!string.Equals(cmd.CommandName, "game", StringComparison.OrdinalIgnoreCase))
             {
-                await msg.Channel.SendMessageAsync("pong");
+                await cmd.RespondAsync("Unknown slash command.", ephemeral: true);
                 return;
             }
 
-            if (cmd == "help")
+            if (cmd.Data.Options.Count == 0)
             {
-                await msg.Channel.SendMessageAsync(
-                    "**Commands**\n" +
-                    "`!newgame` `!status` `!hand` `!play <index>` `!end` `!help`");
+                await cmd.RespondAsync("Missing subcommand.", ephemeral: true);
                 return;
             }
 
-            if (cmd == "newgame")
+            var sub = (SocketSlashCommandDataOption)cmd.Data.Options.First();
+            string command = sub.Name;
+            string[] args = Array.Empty<string>();
+
+            if (command is "play" or "bet" or "useitem" or "inspect")
             {
-                session = new GameSession(channelId);
-                session.StartNewGame(msg.Author.Id);
-
-                _sessions[channelId] = session;
-
-                await msg.Channel.SendMessageAsync(session.IntroText());
-                await msg.Channel.SendMessageAsync(session.StatusText());
-                await msg.Channel.SendMessageAsync(session.HandText());
-                return;
-            }
-
-            if (session == null || !session.HasGame)
-            {
-                await msg.Channel.SendMessageAsync("No active game in this channel. Use `!newgame`.");
-                return;
-            }
-
-            // Lock demo to the owner
-            if (session.OwnerUserId != msg.Author.Id)
-            {
-                await msg.Channel.SendMessageAsync("This game is owned by someone else in this channel.");
-                return;
-            }
-
-            if (cmd == "status")
-            {
-                await msg.Channel.SendMessageAsync(session.StatusText());
-                return;
-            }
-
-            if (cmd == "hand")
-            {
-                await msg.Channel.SendMessageAsync(session.HandText());
-                return;
-            }
-
-            if (cmd == "play")
-            {
-                if (parts.Length < 2 || !int.TryParse(parts[1], out int index))
+                if (sub.Options.Count == 0)
                 {
-                    await msg.Channel.SendMessageAsync("Usage: `!play <index>` (example: `!play 0`)");
+                    await cmd.RespondAsync("Missing numeric argument.", ephemeral: true);
                     return;
                 }
 
-                string result = session.Play(index);
-                await msg.Channel.SendMessageAsync(result);
-
-                if (!session.HasGame)
-                {
-                    await msg.Channel.SendMessageAsync("Game ended. Use `!newgame` to restart.");
-                    return;
-                }
-
-                await msg.Channel.SendMessageAsync(session.StatusText());
-                await msg.Channel.SendMessageAsync(session.HandText());
-                return;
+                args = new[] { sub.Options.First().Value?.ToString() ?? string.Empty };
             }
-
-            if (cmd == "end")
+            else if (command is "kit" or "job")
             {
-                string result = session.EndTurn();
-                await msg.Channel.SendMessageAsync(result);
-
-                if (!session.HasGame)
+                args = new[] { sub.Options.First().Value?.ToString() ?? string.Empty };
+            }
+            else if (command == "choose")
+            {
+                if (sub.Options.Count < 2)
                 {
-                    await msg.Channel.SendMessageAsync("Game ended. Use `!newgame` to restart.");
+                    await cmd.RespondAsync("Need `choice_id` and `option`.", ephemeral: true);
                     return;
                 }
 
-                await msg.Channel.SendMessageAsync(session.StatusText());
-                await msg.Channel.SendMessageAsync(session.HandText());
+                string choiceId = sub.Options.First(o => o.Name == "choice_id").Value?.ToString() ?? string.Empty;
+                string option = sub.Options.First(o => o.Name == "option").Value?.ToString() ?? string.Empty;
+                args = new[] { choiceId, option };
+            }
+
+            if (cmd.ChannelId is not ulong channelId)
+            {
+                await cmd.RespondAsync("Unable to determine channel.", ephemeral: true);
                 return;
             }
 
-            await msg.Channel.SendMessageAsync("Unknown command. Use `!help`.");
+            var result = await _gameService.HandleCommandAsync(channelId, cmd.User.Id, command, args, cmd.Id.ToString());
+            string response = string.Join("\n\n", result.Messages.Where(m => !string.IsNullOrWhiteSpace(m)));
+            if (string.IsNullOrWhiteSpace(response)) response = "Done.";
+
+            await cmd.RespondAsync(response);
         }
     }
 }
+
