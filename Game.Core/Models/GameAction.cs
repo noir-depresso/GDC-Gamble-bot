@@ -1,5 +1,6 @@
 namespace Game.Core.Models
 {
+    // Marker base type for all engine inputs. Each derived record is one legal state transition.
     public abstract record GameAction;
 
     public sealed record PlaceBetAction(int Amount) : GameAction;

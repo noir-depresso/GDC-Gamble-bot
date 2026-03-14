@@ -1,5 +1,6 @@
 namespace Game.Core.Models
 {
+    // Shared combat-side data for both the player and the current enemy.
     public class Combatant
     {
         public string Name { get; set; } = string.Empty;
@@ -10,10 +11,12 @@ namespace Game.Core.Models
 
         public bool IsDead => CurrentHealth <= 0;
 
+        // Parameterless constructor supports serialization.
         public Combatant()
         {
         }
 
+        // Main constructor used by the engine when creating fresh combatants.
         public Combatant(string name, int attack, int maxHealth, bool isEnemy)
         {
             Name = name;
@@ -23,6 +26,7 @@ namespace Game.Core.Models
             IsEnemy = isEnemy;
         }
 
+        // Damage is clamped so effects cannot accidentally heal via negative values.
         public void TakeDamage(int amount)
         {
             if (amount < 0) amount = 0;
@@ -30,6 +34,7 @@ namespace Game.Core.Models
             if (CurrentHealth < 0) CurrentHealth = 0;
         }
 
+        // Healing is capped at max health for consistent combat math.
         public void Heal(int amount)
         {
             if (amount < 0) amount = 0;

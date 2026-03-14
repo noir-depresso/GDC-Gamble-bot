@@ -1,17 +1,23 @@
 namespace Game.Core.Effects.Implementations
 {
+    /// <summary>
+    /// Delayed next-turn damage buff.
+    /// Duration is intentionally 2 so the status survives the end-of-turn tick and is still present next turn.
+    /// </summary>
     public class EnchantmentEffect : IEffect
     {
         public EffectTrigger Trigger => EffectTrigger.OnPlay;
 
         public string Apply(EffectContext ctx)
         {
-            // duration 2 so it remains through the next player turn after end-of-turn ticking
             ctx.State.AddStacks(EffectIds.ENCHANT_NEXT_TURN, 1, durationTurns: 2);
             return "Enchantment: +30% damage next turn.";
         }
     }
 
+    /// <summary>
+    /// Arms a one-turn reactive defense that either pays off when attacked or backfires at turn end.
+    /// </summary>
     public class DiscreditEffect : IEffect
     {
         public EffectTrigger Trigger => EffectTrigger.OnPlay;

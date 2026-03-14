@@ -2,6 +2,10 @@ using System;
 
 namespace Game.Core.Effects.Implementations
 {
+    /// <summary>
+    /// Basic direct-damage effect used by straightforward attack cards.
+    /// It applies temporary damage buffs before the state's global scaling multipliers.
+    /// </summary>
     public class DealDamageEffect : IEffect
     {
         public EffectTrigger Trigger => EffectTrigger.OnPlay;
@@ -16,6 +20,7 @@ namespace Game.Core.Effects.Implementations
             int dmg = _amount;
             float mult = 1f;
 
+            // Buff-style statuses stack before difficulty/encounter scaling so card text stays intuitive.
             int enchant = ctx.State.GetStacks(EffectIds.ENCHANT_NEXT_TURN);
             if (enchant > 0) mult *= 1f + (0.30f * enchant);
 
@@ -25,8 +30,10 @@ namespace Game.Core.Effects.Implementations
             dmg = (int)MathF.Round(dmg * mult);
             if (dmg < 0) dmg = 0;
 
+            dmg = ctx.State.ScalePlayerOutgoingDamage(dmg);
             ctx.Target.TakeDamage(dmg);
 
+            // Wane and Wax tracks the final damage that landed, not the raw card base value.
             if (ctx.State.GetStacks(EffectIds.WANE_WAX_NEXT) > 0)
                 ctx.State.AddStacks(EffectIds.WANE_WAX_DAMAGE_TRACK, dmg, durationTurns: 2);
 
@@ -34,6 +41,9 @@ namespace Game.Core.Effects.Implementations
         }
     }
 
+    /// <summary>
+    /// Fixed-value healing effect for simple recovery cards.
+    /// </summary>
     public class HealEffect : IEffect
     {
         public EffectTrigger Trigger => EffectTrigger.OnPlay;
@@ -48,6 +58,9 @@ namespace Game.Core.Effects.Implementations
         }
     }
 
+    /// <summary>
+    /// Tradeoff heal that restores a percentage of max HP while permanently shrinking the max-health cap.
+    /// </summary>
     public class HealPercentAndReduceMaxHealthEffect : IEffect
     {
         public EffectTrigger Trigger => EffectTrigger.OnPlay;
@@ -75,6 +88,9 @@ namespace Game.Core.Effects.Implementations
         }
     }
 
+    /// <summary>
+    /// Scaling damage card whose output increases each time the card is played in a run.
+    /// </summary>
     public class SocialPressureEffect : IEffect
     {
         public EffectTrigger Trigger => EffectTrigger.OnPlay;
@@ -88,11 +104,15 @@ namespace Game.Core.Effects.Implementations
             if (ctx.Target == null)
                 return $"Social Pressure stacks: {stacks}. (No target to hit.)";
 
+            dmg = ctx.State.ScalePlayerOutgoingDamage(dmg);
             ctx.Target.TakeDamage(dmg);
             return $"Social Pressure stacks: {stacks}. Dealt {dmg} damage.";
         }
     }
 
+    /// <summary>
+    /// Simple variance card that either spikes or low-rolls from a 50/50 coin flip.
+    /// </summary>
     public class CoinFlipDamageEffect : IEffect
     {
         public EffectTrigger Trigger => EffectTrigger.OnPlay;
@@ -110,6 +130,7 @@ namespace Game.Core.Effects.Implementations
             bool heads = ctx.Random.NextDouble() >= 0.5;
             float mult = heads ? 2f : 0.5f;
             int dmg = (int)MathF.Round(_baseDamage * mult);
+            dmg = ctx.State.ScalePlayerOutgoingDamage(dmg);
             ctx.Target.TakeDamage(dmg);
 
             return heads
@@ -118,6 +139,9 @@ namespace Game.Core.Effects.Implementations
         }
     }
 
+    /// <summary>
+    /// Defensive setup card that sacrifices economy for one safer incoming hit window.
+    /// </summary>
     public class HedgingEffect : IEffect
     {
         public EffectTrigger Trigger => EffectTrigger.OnPlay;
@@ -130,6 +154,9 @@ namespace Game.Core.Effects.Implementations
         }
     }
 
+    /// <summary>
+    /// Delayed sustain effect that pays you back for the damage you deal next turn.
+    /// </summary>
     public class WaneAndWaxEffect : IEffect
     {
         public EffectTrigger Trigger => EffectTrigger.OnPlay;
@@ -142,6 +169,9 @@ namespace Game.Core.Effects.Implementations
         }
     }
 
+    /// <summary>
+    /// Reflection effect that turns part of an incoming hit back onto the enemy.
+    /// </summary>
     public class FirewallEffect : IEffect
     {
         public EffectTrigger Trigger => EffectTrigger.OnPlay;
@@ -153,6 +183,9 @@ namespace Game.Core.Effects.Implementations
         }
     }
 
+    /// <summary>
+    /// Directly reduces enemy attack, making future enemy turns less punishing.
+    /// </summary>
     public class GuardDownEffect : IEffect
     {
         public EffectTrigger Trigger => EffectTrigger.OnPlay;
@@ -167,6 +200,9 @@ namespace Game.Core.Effects.Implementations
         }
     }
 
+    /// <summary>
+    /// Conditional burst setup that only turns on when the player is in the danger zone.
+    /// </summary>
     public class ReleaseFilesEffect : IEffect
     {
         public EffectTrigger Trigger => EffectTrigger.OnPlay;
@@ -183,6 +219,9 @@ namespace Game.Core.Effects.Implementations
         }
     }
 
+    /// <summary>
+    /// Emergency heal plus a temporary immunity flag for the next incoming hit window.
+    /// </summary>
     public class SutureKitEffect : IEffect
     {
         public EffectTrigger Trigger => EffectTrigger.OnPlay;
@@ -195,6 +234,9 @@ namespace Game.Core.Effects.Implementations
         }
     }
 
+    /// <summary>
+    /// Sets up retaliation if hit, or a consolation heal if the enemy never triggers it.
+    /// </summary>
     public class TraumaTeamEffect : IEffect
     {
         public EffectTrigger Trigger => EffectTrigger.OnPlay;
@@ -206,6 +248,9 @@ namespace Game.Core.Effects.Implementations
         }
     }
 
+    /// <summary>
+    /// Placeholder EMP protection hook used by the simplified ruleset.
+    /// </summary>
     public class EmpEffect : IEffect
     {
         public EffectTrigger Trigger => EffectTrigger.OnPlay;
@@ -217,20 +262,27 @@ namespace Game.Core.Effects.Implementations
         }
     }
 
+    /// <summary>
+    /// Damage card that schedules itself to return, effectively acting as repeatable pressure.
+    /// </summary>
     public class HiredGunEffect : IEffect
     {
         public EffectTrigger Trigger => EffectTrigger.OnPlay;
 
         public string Apply(EffectContext ctx)
         {
+            int dmg = ctx.State.ScalePlayerOutgoingDamage(20);
             if (ctx.Target != null)
-                ctx.Target.TakeDamage(20);
+                ctx.Target.TakeDamage(dmg);
 
             ctx.State.AddStacks(EffectIds.HIRED_GUN_RETURN, 1, durationTurns: 1);
-            return "Hired Gun: dealt 20 damage and will return to hand.";
+            return $"Hired Gun: dealt {dmg} damage and will return to hand.";
         }
     }
 
+    /// <summary>
+    /// Delayed card-draw setup with a small random delay so planning around it is imperfect.
+    /// </summary>
     public class RaanEffect : IEffect
     {
         public EffectTrigger Trigger => EffectTrigger.OnPlay;
@@ -243,6 +295,9 @@ namespace Game.Core.Effects.Implementations
         }
     }
 
+    /// <summary>
+    /// Random event card with one of three outcomes: self-harm, self-heal, or enemy damage.
+    /// </summary>
     public class RouletteEffect : IEffect
     {
         public EffectTrigger Trigger => EffectTrigger.OnPlay;
@@ -262,12 +317,16 @@ namespace Game.Core.Effects.Implementations
                 return "Roulette: healed 20.";
             }
 
+            int dmg = ctx.State.ScalePlayerOutgoingDamage(20);
             if (ctx.Target != null)
-                ctx.Target.TakeDamage(20);
-            return "Roulette: dealt 20 damage to enemy.";
+                ctx.Target.TakeDamage(dmg);
+            return $"Roulette: dealt {dmg} damage to enemy.";
         }
     }
 
+    /// <summary>
+    /// Marks the hand to be rebuilt later in the turn/round pipeline instead of reshuffling immediately.
+    /// </summary>
     public class ChaosEffect : IEffect
     {
         public EffectTrigger Trigger => EffectTrigger.OnPlay;
@@ -279,6 +338,9 @@ namespace Game.Core.Effects.Implementations
         }
     }
 
+    /// <summary>
+    /// Schedules a delayed generated item reward for future turns.
+    /// </summary>
     public class SpiderAndroidsEffect : IEffect
     {
         public EffectTrigger Trigger => EffectTrigger.OnPlay;

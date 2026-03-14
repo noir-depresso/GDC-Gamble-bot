@@ -7,6 +7,7 @@ using Game.Core.Random;
 
 namespace Game.Core.Engine
 {
+    // Core gameplay engine. It owns the authoritative rules for combat, economy transitions, and intermission flow.
     public class GameEngine
     {
         public GameState State { get; private set; } = new();
@@ -14,22 +15,26 @@ namespace Game.Core.Engine
         private readonly EffectRunner _runner = new();
         private readonly IRandom _random;
 
+        // Accepts a random provider so tests can fully control randomness-sensitive rules.
         public GameEngine(IRandom? random = null)
         {
             _random = random ?? new DefaultRandom();
         }
 
-        public void StartNewGame()
+        // Replaces the current in-memory state with a fresh default run.
+        public void StartNewGame(DeckComposition? deckComposition = null)
         {
-            State = CreateInitialState(CharacterClass.Thief);
+            State = CreateInitialState(CharacterClass.Thief, deckComposition);
         }
 
+        // Loads a previously saved snapshot back into the engine.
         public void LoadState(GameState state)
         {
             State = state ?? throw new ArgumentNullException(nameof(state));
         }
 
-        public GameState CreateInitialState(CharacterClass characterClass)
+        // Builds a fully playable starting state, including deck, hand, checkpoints, and the first encounter modifier.
+        public GameState CreateInitialState(CharacterClass characterClass, DeckComposition? deckComposition = null)
         {
             var state = new GameState
             {
@@ -50,7 +55,7 @@ namespace Game.Core.Engine
                 HandCardIds = new List<string>(),
                 GeneratedItems = new List<string>(),
                 LockedDeckCardIds = GetLockedCards(characterClass),
-                FullDeckCardIds = BuildDeck(characterClass),
+                FullDeckCardIds = BuildDeck(characterClass, deckComposition),
                 JobFatigue = 0,
                 JobsCompleted = 0,
                 LastJobType = null
@@ -63,13 +68,17 @@ namespace Game.Core.Engine
 
             state.LastCheckpointMoney = state.Money;
             state.LastCheckpointPlayerHp = state.Player.CurrentHealth;
+            state.ActiveEncounterModifier = RollEncounterModifier(state);
             return state;
         }
 
+        // Convenience overload for applying an action against the current engine state.
         public GameUpdate Apply(GameAction action) => Apply(State, action);
 
+        // Main action dispatcher. Every legal command eventually funnels through this method.
         public GameUpdate Apply(GameState state, GameAction action)
         {
+            // Dispatch by action type so validation and rule handling stay localized per action.
             var update = action switch
             {
                 SelectCharacterAction select => ApplySelectCharacter(state, select.CharacterClass),
@@ -87,8 +96,10 @@ namespace Game.Core.Engine
             return update;
         }
 
+        // Convenience overload for cost calculation against the current state.
         public int FinalCost(CardDef card) => FinalCost(State, card);
 
+        // Applies permanent/temporary cost modifiers before a card is played.
         public int FinalCost(GameState state, CardDef card)
         {
             int stacks = Math.Min(2, state.GetStacks(EffectIds.BUY_LOW));
@@ -100,6 +111,7 @@ namespace Game.Core.Engine
             return cost;
         }
 
+        // Character selection is only allowed before the run has meaningfully started.
         private GameUpdate ApplySelectCharacter(GameState state, CharacterClass characterClass)
         {
             if (state.TurnNumber != 1 || state.Phase != GamePhase.Betting || state.BetAmount > 0 || state.BitsSpentThisCombat > 0)
@@ -110,6 +122,7 @@ namespace Game.Core.Engine
             return new GameUpdate { Messages = { $"Character selected: {characterClass}." }, StateChanged = true };
         }
 
+        // Converts money into opening combat tempo by front-loading bits.
         private GameUpdate ApplyPlaceBet(GameState state, int amount)
         {
             var update = new GameUpdate();
@@ -120,6 +133,7 @@ namespace Game.Core.Engine
                 return update;
             }
 
+            // Debt is handled before the next combat starts so the player cannot snowball a broken economy state.
             if (state.InDebt)
             {
                 update.Errors.Add("You are in debt. Use jobs to clear debt before starting the next combat.");
@@ -152,6 +166,7 @@ namespace Game.Core.Engine
             return update;
         }
 
+        // Resolves between-combat cleanup, debt penalties, encounter setup, and combat reset.
         private GameUpdate ApplyStartNextCombat(GameState state)
         {
             var update = new GameUpdate();
@@ -162,6 +177,17 @@ namespace Game.Core.Engine
                 return update;
             }
 
+            // Packet choices are allowed to auto-resolve for pacing when the player clearly wants to move on.
+            if (state.PendingChoice != null && string.Equals(state.PendingChoice.ChoiceType, "INTERMISSION_PACKET", StringComparison.Ordinal))
+            {
+                ResolveIntermissionPacketOption(state, "bank", update, true);
+            }
+
+            int pendingBonusBits = Math.Max(0, state.NextCombatBonusBits);
+            int pendingEnemyAttackBonus = Math.Max(0, state.NextCombatEnemyAttackBonus);
+            int pendingBitsPenalty = Math.Max(0, state.NextCombatBitsPenalty);
+
+            // Debt is handled before the next combat starts so the player cannot snowball a broken economy state.
             if (state.InDebt)
             {
                 state.Money = Math.Max(0, state.LastCheckpointMoney);
@@ -179,10 +205,21 @@ namespace Game.Core.Engine
 
             ResetCombatState(state);
             update.Messages.Add("New combat started.");
+            update.Messages.Add($"Encounter modifier: {state.EncounterModifierLabel} - {state.EncounterModifierSummary}");
+            if (state.StartingBitsBonusFromUnlockTier > 0)
+                update.Messages.Add($"Unlock tier bonus: +{state.StartingBitsBonusFromUnlockTier} starting bits.");
+            if (pendingBonusBits > 0)
+                update.Messages.Add($"Packet bonus: +{pendingBonusBits} starting bits this combat.");
+            if (pendingEnemyAttackBonus > 0)
+                update.Messages.Add($"Packet drawback: enemy starts with +{pendingEnemyAttackBonus} attack this combat.");
+            if (pendingBitsPenalty > 0)
+                update.Messages.Add($"Packet drawback: next-combat bits reduced by {pendingBitsPenalty}.");
+
             update.StateChanged = true;
             return update;
         }
 
+        // Side-job system used to recover from debt or stabilize between combats.
         private GameUpdate ApplyWorkJob(GameState state, string jobType)
         {
             var update = new GameUpdate();
@@ -193,6 +230,12 @@ namespace Game.Core.Engine
                 return update;
             }
 
+
+            // Packet choices are allowed to auto-resolve for pacing when the player clearly wants to move on.
+            if (state.PendingChoice != null && string.Equals(state.PendingChoice.ChoiceType, "INTERMISSION_PACKET", StringComparison.Ordinal))
+            {
+                ResolveIntermissionPacketOption(state, "bank", update, true);
+            }
             string normalized = jobType?.Trim().ToLowerInvariant() ?? string.Empty;
             int basePayout = normalized switch
             {
@@ -210,14 +253,13 @@ namespace Game.Core.Engine
                 return update;
             }
 
-            if (string.Equals(state.LastJobType, normalized, StringComparison.OrdinalIgnoreCase))
-            {
-                update.Errors.Add("Job cooldown: you cannot run the same job twice in a row.");
-                return update;
-            }
+            // Repeating the same job is allowed, but it is intentionally less efficient than rotating options.
+            bool repeatedJob = string.Equals(state.LastJobType, normalized, StringComparison.OrdinalIgnoreCase);
 
             float fatiguePenalty = Math.Min(0.50f, state.JobFatigue * 0.05f);
-            int payout = (int)MathF.Round(basePayout * (1f - fatiguePenalty));
+            float repetitionPenalty = repeatedJob ? 0.25f : 0f;
+            float totalPenalty = Math.Min(0.80f, fatiguePenalty + repetitionPenalty);
+            int payout = (int)MathF.Round(basePayout * (1f - totalPenalty));
             if (payout < 1) payout = 1;
             int bitsReward = Math.Max(1, (int)MathF.Round(payout * 0.20f));
 
@@ -226,7 +268,7 @@ namespace Game.Core.Engine
                 int apples = _random.Next(1, 8);
                 int length = 3 + apples;
                 int snakeMoney = 40 + (apples * 35);
-                payout = Math.Max(1, (int)MathF.Round(snakeMoney * (1f - fatiguePenalty)));
+                payout = Math.Max(1, (int)MathF.Round(snakeMoney * (1f - totalPenalty)));
                 bitsReward = 6 + (apples * 3);
                 update.Messages.Add($"Mini-game Snake: length `{length}` (apples eaten `{apples}`).");
             }
@@ -235,7 +277,7 @@ namespace Game.Core.Engine
                 int streak = 0;
                 while (streak < 5 && _random.Next(0, 100) < 55) streak++;
                 int coinMoney = 35 + (streak * 45);
-                payout = Math.Max(1, (int)MathF.Round(coinMoney * (1f - fatiguePenalty)));
+                payout = Math.Max(1, (int)MathF.Round(coinMoney * (1f - totalPenalty)));
                 bitsReward = 4 + (streak * 6);
                 update.Messages.Add($"Mini-game Coinflip: streak `{streak}`.");
             }
@@ -246,7 +288,11 @@ namespace Game.Core.Engine
             state.JobsCompleted += 1;
             state.LastJobType = normalized;
 
-            update.Messages.Add($"Job complete: {normalized}. Earned +{payout} money and +{bitsReward} bits (fatigue penalty {(int)MathF.Round(fatiguePenalty * 100)}%).");
+            update.Messages.Add($"Job complete: {normalized}. Earned +{payout} money and +{bitsReward} bits (total penalty {(int)MathF.Round(totalPenalty * 100)}%).");
+            if (repeatedJob)
+            {
+                update.Messages.Add("Repeated job penalty applied: -25% payout for running the same job consecutively.");
+            }
 
             if (state.JobFatigue % 3 == 0)
             {
@@ -267,6 +313,7 @@ namespace Game.Core.Engine
             return update;
         }
 
+        // Validates the card play, spends bits, runs effects, and checks for immediate victory.
         private GameUpdate ApplyPlayCard(GameState state, int index)
         {
             var update = new GameUpdate();
@@ -320,6 +367,7 @@ namespace Game.Core.Engine
 
             update.Messages.Add($"You played **{card.Name}** (paid {cost} bits).\nType: {card.Type}");
 
+            // Card effects operate through a shared context object so they can see combatants, state, and randomness.
             var ctx = new EffectContext(state.Player, state.Enemy, state, _random);
             string log = _runner.RunOnPlay(card, ctx);
             if (!string.IsNullOrWhiteSpace(log)) update.Messages.Add(log);
@@ -336,6 +384,7 @@ namespace Game.Core.Engine
             return update;
         }
 
+        // Resolves any pending modal choice created by cards or system events.
         private GameUpdate ApplyChooseOption(GameState state, ChooseOptionAction action)
         {
             var update = new GameUpdate();
@@ -359,6 +408,7 @@ namespace Game.Core.Engine
                 return update;
             }
 
+            // Choice handling is intentionally explicit because different prompts have very different side effects.
             switch (pending.ChoiceType)
             {
                 case "PERSUASION":
@@ -403,6 +453,9 @@ namespace Game.Core.Engine
                             ResolveWin(state, update);
                     }
                     break;
+                case "INTERMISSION_PACKET":
+                    ResolveIntermissionPacketOption(state, action.OptionId, update, false);
+                    break;
                 default:
                     update.Messages.Add($"Choice resolved for {pending.ChoiceType} with option {action.OptionId}.");
                     break;
@@ -413,6 +466,7 @@ namespace Game.Core.Engine
             return update;
         }
 
+        // Generated items are a lightweight side-system for delayed card effects like Spider Androids.
         private GameUpdate ApplyUseItem(GameState state, int itemIndex)
         {
             var update = new GameUpdate();
@@ -448,6 +502,7 @@ namespace Game.Core.Engine
             return update;
         }
 
+        // Handles card-specific lifecycle rules that are easier to express outside generic effects.
         private void HandlePostPlayRules(GameState state, CardDef card, GameUpdate update)
         {
             if (card.Id == "HIREDGUN")
@@ -476,6 +531,7 @@ namespace Game.Core.Engine
             }
         }
 
+        // Advances the combat loop through enemy attack, round-end effects, and next-turn draw.
         private GameUpdate ApplyEndTurn(GameState state)
         {
             var update = new GameUpdate();
@@ -501,12 +557,17 @@ namespace Game.Core.Engine
             state.Phase = GamePhase.EnemyTurn;
             update.Messages.Add("**You ended your turn.**");
 
+            // Enemy turns are intentionally simple for now: attack value -> before-damage triggers -> final hit.
             int incoming = state.Enemy.Attack;
             var beforeCtx = new EffectContext(state.Player, state.Enemy, state, _random) { PendingDamage = incoming };
             string beforeLog = _runner.FireTrigger(EffectTrigger.OnBeforeTakeDamage, beforeCtx);
             if (!string.IsNullOrWhiteSpace(beforeLog)) update.Messages.Add(beforeLog);
 
-            int finalIncoming = beforeCtx.PendingDamage;
+            int finalIncoming = state.ScaleIncomingDamage(beforeCtx.PendingDamage);
+            if (finalIncoming != beforeCtx.PendingDamage)
+            {
+                update.Messages.Add($"Difficulty/modifier scaling adjusted incoming damage from {beforeCtx.PendingDamage} to {finalIncoming}.");
+            }
             state.Player.TakeDamage(finalIncoming);
             state.WasAttackedThisTurn = finalIncoming > 0;
             update.Messages.Add($"Enemy attacks for {finalIncoming}. Player HP: {state.Player.CurrentHealth}/{state.Player.MaxHealth}.");
@@ -518,8 +579,25 @@ namespace Game.Core.Engine
             if (state.Player.IsDead)
             {
                 update.Messages.Add("You died. Combat lost.");
+
+                if (state.PendingGrowthRiskLossPenalty > 0)
+                {
+                    int penalty = state.PendingGrowthRiskLossPenalty;
+                    state.PendingGrowthRiskLossPenalty = 0;
+                    state.Money -= penalty;
+                    update.Messages.Add($"Growth risk triggered: lost {penalty} money on defeat.");
+                }
+
                 state.IsOver = true;
                 state.Phase = GamePhase.CombatEnded;
+                if (state.CombatsWonThisRun > 0)
+                {
+                    update.Messages.Add($"Run streak ended at {state.CombatsWonThisRun} combat win(s).");
+                }
+                state.CombatsWonThisRun = 0;
+                state.RunsFailed += 1;
+                GrantMetaCredits(state, 1, update, "defeat progress");
+                QueueIntermissionPacket(state, update);
                 update.StateChanged = true;
                 return update;
             }
@@ -571,28 +649,125 @@ namespace Game.Core.Engine
             return update;
         }
 
+        // Applies all combat-win rewards, progression gains, and post-fight packet generation.
         private void ResolveWin(GameState state, GameUpdate update)
         {
             state.IsOver = true;
             state.Phase = GamePhase.CombatEnded;
 
+            // Combat wins convert short-term tempo back into long-term resources and progression.
             int bitConversion = (int)MathF.Round(state.BitsGainedThisCombat * 0.50f);
             int betWinnings = state.BetAmount;
             int total = bitConversion + betWinnings;
             int bitsFromMoneyWin = Math.Max(0, (int)MathF.Round(total * 0.10f));
-            state.Money += total;
+            int unlockMoneyBonus = state.PostCombatMoneyBonusFromUnlockTier;
+            state.Money += total + unlockMoneyBonus;
             state.Bits += bitsFromMoneyWin;
 
             state.LastCheckpointMoney = state.Money;
             state.LastCheckpointPlayerHp = state.Player.CurrentHealth;
+            state.CombatsWonThisRun += 1;
+            if (state.CombatsWonThisRun % 3 == 0)
+            {
+                GrantMetaCredits(state, 5, update, $"milestone (combat {state.CombatsWonThisRun})");
+            }
+            GrantMetaCredits(state, 3, update, "combat win");
+            if (state.CombatsWonThisRun >= 5)
+            {
+                state.RunsCompleted += 1;
+                GrantMetaCredits(state, 10, update, "run completion milestone");
+                update.Messages.Add($"Run completion recorded (total completed runs: {state.RunsCompleted}).");
+                state.CombatsWonThisRun = 0;
+            }
 
             update.Messages.Add("Enemy defeated. You win.");
             update.Messages.Add($"Post-combat winnings: +{bitConversion} (bits) +{betWinnings} (bet) = +{total} money.");
+            if (unlockMoneyBonus > 0)
+                update.Messages.Add($"Unlock tier bonus: +{unlockMoneyBonus} money.");
             update.Messages.Add($"Economic sync bonus: +{bitsFromMoneyWin} bits from winnings.");
+
+            if (state.PendingGrowthRiskLossPenalty > 0)
+            {
+                state.PendingGrowthRiskLossPenalty = 0;
+                update.Messages.Add("Growth risk resolved safely: no defeat penalty applied.");
+            }
+
+            QueueIntermissionPacket(state, update);
         }
 
+        // Intermission packets convert the previous combat result into a short-term economy/combat tradeoff.
+        private void ResolveIntermissionPacketOption(GameState state, string rawOptionId, GameUpdate update, bool isAuto)
+        {
+            string optionId = (rawOptionId ?? string.Empty).Trim().ToLowerInvariant();
+            optionId = optionId switch
+            {
+                "safe" => "bank",
+                "growth" => "credit",
+                "spike" => "convert",
+                _ => optionId
+            };
+
+            // Each packet option intentionally pushes the next combat in a different direction.
+            if (optionId == "convert")
+            {
+                int conversionMoney = Math.Min(120, Math.Max(0, state.Money));
+                int bonusBits = Math.Max(10, (int)MathF.Round(conversionMoney * 0.50f));
+                state.Money -= conversionMoney;
+                state.NextCombatBonusBits += bonusBits;
+                update.Messages.Add($"Intermission packet (Convert): spent {conversionMoney} money for +{bonusBits} next-combat bits.");
+            }
+            else if (optionId == "credit")
+            {
+                const int debtCost = 150;
+                state.Money -= debtCost;
+                state.NextCombatBonusBits += 70;
+                state.NextCombatEnemyAttackBonus += 6;
+                state.PendingGrowthRiskLossPenalty += 120;
+                update.Messages.Add("Intermission packet (Credit): took 150 debt for +70 next-combat bits. Drawback: enemy +6 attack and defeat penalty 120 money.");
+            }
+            else
+            {
+                state.Money += 140;
+                state.NextCombatBitsPenalty += 20;
+                update.Messages.Add("Intermission packet (Bank): gained +140 money. Drawback: next combat starts with -20 bits.");
+            }
+
+            if (isAuto)
+                update.Messages.Add("Intermission packet auto-resolved as `bank` for faster pacing.");
+
+            state.PendingChoice = null;
+        }
+
+        // Creates the post-combat packet choice if one is not already pending.
+        private void QueueIntermissionPacket(GameState state, GameUpdate update)
+        {
+            if (state.PendingChoice != null)
+                return;
+
+            string choiceId = $"intermission_{state.TurnNumber}_{_random.Next(1000, 10000)}";
+            state.PendingChoice = new PendingChoice
+            {
+                ChoiceId = choiceId,
+                ChoiceType = "INTERMISSION_PACKET",
+                Prompt = "Choose packet: `convert` (money->bits), `credit` (debt for power), `bank` (safe money but slower start).",
+                SourceCardId = "SYSTEM_INTERMISSION",
+                Options = new List<string> { "convert", "credit", "bank", "safe", "growth", "spike" }
+            };
+
+            update.Messages.Add("Intermission packet available. Use `!packet <convert|credit|bank>` or `!choose <choiceId> <option>`.");
+        }
+
+        // Resets combat-only state while preserving run-level progression and pending cross-combat modifiers.
         private void ResetCombatState(GameState state)
         {
+            // Cross-combat packet modifiers are consumed here, then cleared once the new fight is ready.
+            int bonusBits = Math.Max(0, state.NextCombatBonusBits);
+            int enemyAttackBonus = Math.Max(0, state.NextCombatEnemyAttackBonus);
+            int bitsPenalty = Math.Max(0, state.NextCombatBitsPenalty);
+            state.NextCombatBonusBits = 0;
+            state.NextCombatEnemyAttackBonus = 0;
+            state.NextCombatBitsPenalty = 0;
+
             state.IsOver = false;
             state.Phase = GamePhase.Betting;
             state.TurnNumber = 1;
@@ -608,8 +783,10 @@ namespace Game.Core.Engine
             state.GeneratedItems.Clear();
             state.Statuses.Clear();
 
-            state.Enemy = new Combatant("Enemy", 20, 120, true);
-            state.Bits = state.CharacterClass == CharacterClass.Thief ? 80 : 120;
+            state.ActiveEncounterModifier = RollEncounterModifier(state);
+            state.Enemy = new Combatant("Enemy", 20 + enemyAttackBonus, 120, true);
+            int baseBits = (state.CharacterClass == CharacterClass.Thief ? 80 : 120) + bonusBits - bitsPenalty + state.StartingBitsBonusFromUnlockTier;
+            state.Bits = Math.Max(0, baseBits);
 
             state.DrawPileCardIds = new List<string>(state.FullDeckCardIds);
             state.DiscardPileCardIds = new List<string>();
@@ -618,6 +795,55 @@ namespace Game.Core.Engine
             for (int i = 0; i < 6; i++) DrawCard(state);
         }
 
+        // Centralizes meta-currency gains so unlock tier bumps always stay in sync with lifetime progress.
+        private void GrantMetaCredits(GameState state, int amount, GameUpdate update, string reason)
+        {
+            if (amount <= 0) return;
+
+            int safeAmount = Math.Max(0, amount);
+            state.MetaCredits += safeAmount;
+            state.LifetimeMetaCredits += safeAmount;
+            update.Messages.Add($"Meta credits +{safeAmount} ({reason}).");
+
+            int oldTier = state.UnlockTier;
+            int newTier = GameState.UnlockTierFromLifetimeMetaCredits(state.LifetimeMetaCredits);
+            state.UnlockTier = newTier;
+            if (newTier > oldTier)
+            {
+                update.Messages.Add($"Unlock tier increased: {oldTier} -> {newTier}.");
+            }
+        }
+
+        // Encounter rolls are difficulty-weighted so easier modes produce fewer punishing global modifiers.
+        private string RollEncounterModifier(GameState state)
+        {
+            int difficulty = GameState.ClampDifficultyLevel(state.DifficultyLevel);
+            int roll = _random.Next(0, 100);
+
+            if (difficulty <= 2)
+            {
+                if (roll < 50) return GameState.EncounterNone;
+                if (roll < 70) return GameState.EncounterMarketCrash;
+                if (roll < 85) return GameState.EncounterPowerSurge;
+                return GameState.EncounterAudit;
+            }
+
+            if (difficulty == 3)
+            {
+                if (roll < 25) return GameState.EncounterNone;
+                if (roll < 50) return GameState.EncounterMarketCrash;
+                if (roll < 75) return GameState.EncounterPowerSurge;
+                return GameState.EncounterAudit;
+            }
+
+            if (roll < 15) return GameState.EncounterNone;
+            if (roll < 50) return GameState.EncounterMarketCrash;
+            if (roll < 75) return GameState.EncounterPowerSurge;
+            return GameState.EncounterAudit;
+        }
+
+
+        // Draws one card while respecting hand cap and discard reshuffle rules.
         private void DrawCard(GameState state)
         {
             if (state.HandCardIds.Count >= state.MaxHandSize) return;
@@ -635,6 +861,7 @@ namespace Game.Core.Engine
             state.HandCardIds.Add(next);
         }
 
+        // Standard Fisher-Yates shuffle driven by the injected random source.
         private void Shuffle(List<string> cards)
         {
             for (int i = cards.Count - 1; i > 0; i--)
@@ -644,6 +871,7 @@ namespace Game.Core.Engine
             }
         }
 
+        // Locked cards define the identity baseline for each class.
         private static List<string> GetLockedCards(CharacterClass cls)
         {
             return cls == CharacterClass.Thief
@@ -651,23 +879,90 @@ namespace Game.Core.Engine
                 : new List<string> { "SOCIAL", "PERSUASION", "GUARDDOWN" };
         }
 
-        private static List<string> BuildDeck(CharacterClass cls)
+        // Builds either the default starter deck or a player-preferred type composition.
+        private static List<string> BuildDeck(CharacterClass cls, DeckComposition? deckComposition)
         {
-            var deck = CardLibrary.StarterDeckCardIds();
-            var lockedCards = GetLockedCards(cls);
+            if (deckComposition == null)
+            {
+                var deck = CardLibrary.StarterDeckCardIds();
+                var lockedCards = GetLockedCards(cls);
 
-            for (int i = 0; i < lockedCards.Count && i < deck.Count; i++)
-                deck[i] = lockedCards[i];
+                for (int i = 0; i < lockedCards.Count && i < deck.Count; i++)
+                    deck[i] = lockedCards[i];
 
-            if (deck.Count > 32)
-                deck = deck.GetRange(0, 32);
+                if (deck.Count > DeckComposition.DeckSize)
+                    deck = deck.GetRange(0, DeckComposition.DeckSize);
 
-            while (deck.Count < 32)
+                while (deck.Count < DeckComposition.DeckSize)
+                    deck.Add("TROJAN");
+
+                return deck;
+            }
+
+            return BuildDeckFromComposition(deckComposition);
+        }
+
+        // Expands a type-count preference into a concrete ordered card list.
+        private static List<string> BuildDeckFromComposition(DeckComposition composition)
+        {
+            var starterUnique = CardLibrary.StarterDeckCardIds();
+            var uniqueCards = new List<string>();
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var cardId in starterUnique)
+            {
+                if (seen.Add(cardId))
+                    uniqueCards.Add(cardId);
+            }
+
+            var bruisers = FilterByType(uniqueCards, CardType.Bruiser);
+            var medicates = FilterByType(uniqueCards, CardType.Medicate);
+            var investments = FilterByType(uniqueCards, CardType.Investment);
+            var specials = FilterByType(uniqueCards, CardType.Special);
+
+            var deck = new List<string>(DeckComposition.DeckSize);
+            AddCards(deck, bruisers, composition.BruiserCount);
+            AddCards(deck, medicates, composition.MedicateCount);
+            AddCards(deck, investments, composition.InvestmentCount);
+            AddCards(deck, specials, composition.SpecialCount);
+
+            if (deck.Count < DeckComposition.DeckSize)
+                AddCards(deck, bruisers, DeckComposition.DeckSize - deck.Count);
+
+            if (deck.Count < DeckComposition.DeckSize)
+                AddCards(deck, medicates, DeckComposition.DeckSize - deck.Count);
+
+            if (deck.Count < DeckComposition.DeckSize)
+                AddCards(deck, investments, DeckComposition.DeckSize - deck.Count);
+
+            while (deck.Count < DeckComposition.DeckSize)
                 deck.Add("TROJAN");
 
             return deck;
         }
 
+        // Helper used by deck composition to pull all starter cards of a given role.
+        private static List<string> FilterByType(List<string> cards, CardType type)
+        {
+            var result = new List<string>();
+            foreach (var cardId in cards)
+            {
+                if (CardLibrary.GetById(cardId).Type == type)
+                    result.Add(cardId);
+            }
+
+            return result;
+        }
+
+        // Repeats through a pool when needed so a requested composition can always be filled.
+        private static void AddCards(List<string> target, List<string> pool, int count)
+        {
+            if (count <= 0 || pool.Count == 0) return;
+
+            for (int i = 0; i < count; i++)
+                target.Add(pool[i % pool.Count]);
+        }
+
+        // Copies a freshly built state back into an existing instance so session references stay stable.
         private static void CopyState(GameState src, GameState dst)
         {
             dst.GameStateVersion = src.GameStateVersion;
@@ -682,12 +977,24 @@ namespace Game.Core.Engine
             dst.Bits = src.Bits;
             dst.BitsPerTurn = src.BitsPerTurn;
             dst.MaxHandSize = src.MaxHandSize;
+            dst.DifficultyLevel = src.DifficultyLevel;
             dst.BetAmount = src.BetAmount;
             dst.BitsSpentThisCombat = src.BitsSpentThisCombat;
             dst.BitsGainedThisCombat = src.BitsGainedThisCombat;
             dst.LastRoundMoneyGain = src.LastRoundMoneyGain;
             dst.PendingExtraDraws = src.PendingExtraDraws;
             dst.WasAttackedThisTurn = src.WasAttackedThisTurn;
+            dst.NextCombatBonusBits = src.NextCombatBonusBits;
+            dst.NextCombatEnemyAttackBonus = src.NextCombatEnemyAttackBonus;
+            dst.NextCombatBitsPenalty = src.NextCombatBitsPenalty;
+            dst.PendingGrowthRiskLossPenalty = src.PendingGrowthRiskLossPenalty;
+            dst.ActiveEncounterModifier = src.ActiveEncounterModifier;
+            dst.MetaCredits = src.MetaCredits;
+            dst.LifetimeMetaCredits = src.LifetimeMetaCredits;
+            dst.UnlockTier = src.UnlockTier;
+            dst.CombatsWonThisRun = src.CombatsWonThisRun;
+            dst.RunsCompleted = src.RunsCompleted;
+            dst.RunsFailed = src.RunsFailed;
             dst.BlockedCardType = src.BlockedCardType;
             dst.BlockedCardTypeTurns = src.BlockedCardTypeTurns;
             dst.PendingChoice = src.PendingChoice;
@@ -706,6 +1013,33 @@ namespace Game.Core.Engine
         }
     }
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

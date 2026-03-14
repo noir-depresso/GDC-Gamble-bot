@@ -3,6 +3,7 @@ using Game.Core.Random;
 
 namespace Game.Core.Effects
 {
+    // Per-effect execution context passed to card logic and trigger logic.
     public class EffectContext
     {
         public Combatant User { get; }
@@ -10,6 +11,7 @@ namespace Game.Core.Effects
         public GameState State { get; }
         public IRandom Random { get; }
 
+        // Mutable so pre-damage triggers can rewrite the final hit value.
         public int PendingDamage { get; set; }
 
         public EffectContext(Combatant user, Combatant target, GameState state, IRandom random)

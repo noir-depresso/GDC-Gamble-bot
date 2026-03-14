@@ -4,8 +4,15 @@ using Game.Core.Cards;
 
 namespace Game.Core.Effects
 {
+    /// <summary>
+    /// Executes card effects and lifecycle triggers against a mutable combat state.
+    /// All effect side effects are centralized here so the engine has one place to ask for trigger resolution.
+    /// </summary>
     public class EffectRunner
     {
+        /// <summary>
+        /// Runs only OnPlay effects for a card in definition order and returns a combined combat log snippet.
+        /// </summary>
         public string RunOnPlay(CardDef card, EffectContext ctx)
         {
             var sb = new StringBuilder();
@@ -18,13 +25,17 @@ namespace Game.Core.Effects
             return sb.ToString().TrimEnd();
         }
 
+        /// <summary>
+        /// Fires non-play triggers that depend on engine timing, such as taking damage or ending a round.
+        /// The engine decides when a trigger should happen; the runner handles the status math and log text.
+        /// </summary>
         public string FireTrigger(EffectTrigger trigger, EffectContext ctx)
         {
             var sb = new StringBuilder();
 
             if (trigger == EffectTrigger.OnBeforeTakeDamage)
             {
-                // EMP and Suture both prevent incoming card/effect damage in this simplified model
+                // Defensive statuses adjust pending damage before the hit is applied.
                 if (ctx.State.GetStacks(EffectIds.SUTURE_IMMUNE) > 0)
                 {
                     ctx.PendingDamage = 0;
@@ -41,9 +52,11 @@ namespace Game.Core.Effects
 
             if (trigger == EffectTrigger.OnDamageTaken)
             {
+                // Reactive statuses care about the damage that actually landed this turn.
                 if (ctx.State.GetStacks(EffectIds.FIREWALL_READY) > 0 && ctx.Target != null)
                 {
                     int reflect = (int)MathF.Round(ctx.PendingDamage * 0.25f);
+                    reflect = ctx.State.ScalePlayerOutgoingDamage(reflect);
                     ctx.Target.TakeDamage(reflect);
                     sb.AppendLine($"Firewall: reflected {reflect} damage.");
                 }
@@ -51,9 +64,10 @@ namespace Game.Core.Effects
                 if (ctx.State.GetStacks(EffectIds.DISCREDIT_READY) > 0 && ctx.Target != null)
                 {
                     int reflected = (int)MathF.Round(ctx.PendingDamage * 0.5f);
+                    reflected = ctx.State.ScalePlayerOutgoingDamage(reflected);
                     ctx.Target.TakeDamage(reflected);
 
-                    // also block 50% of the already-applied hit by healing that portion back
+                    // In this simplified model, blocking half the hit is represented by healing that half back.
                     int blocked = (int)MathF.Round(ctx.PendingDamage * 0.5f);
                     ctx.User.Heal(blocked);
 
@@ -63,14 +77,16 @@ namespace Game.Core.Effects
 
                 if (ctx.State.GetStacks(EffectIds.TRAUMA_TEAM_READY) > 0 && ctx.Target != null)
                 {
-                    ctx.Target.TakeDamage(50);
+                    int retaliation = ctx.State.ScalePlayerOutgoingDamage(50);
+                    ctx.Target.TakeDamage(retaliation);
                     ctx.State.RemoveStatus(EffectIds.TRAUMA_TEAM_READY);
-                    sb.AppendLine("Trauma Team: retaliated for 50.");
+                    sb.AppendLine($"Trauma Team: retaliated for {retaliation}.");
                 }
             }
 
             if (trigger == EffectTrigger.OnTurnEnd)
             {
+                // These statuses resolve after both sides have had a chance to interact during the turn.
                 var dis = ctx.State.GetStatus(EffectIds.DISCREDIT_READY);
                 if (dis != null)
                 {
@@ -125,6 +141,7 @@ namespace Game.Core.Effects
 
             if (trigger == EffectTrigger.OnRoundEnd)
             {
+                // Round-end economy is intentionally computed as one pipeline so modifiers stack in a readable order.
                 int roundGain = ctx.State.BasicIncome;
 
                 if (ctx.State.GetStacks(EffectIds.HEDGING_INCOME_PENALTY) > 0)
@@ -163,9 +180,12 @@ namespace Game.Core.Effects
                     sb.AppendLine($"Stocks & Bonds: {(delta >= 0 ? "+" : "")}{delta} money ({pct * 100:0.#}%).");
                 }
 
-                ctx.State.Money += roundGain;
-                ctx.State.LastRoundMoneyGain = Math.Max(0, roundGain);
-                sb.AppendLine($"Round money gain: +{roundGain}.");
+                int scaledRoundGain = ctx.State.ScaleRoundMoneyGain(roundGain);
+                ctx.State.Money += scaledRoundGain;
+                ctx.State.LastRoundMoneyGain = Math.Max(0, scaledRoundGain);
+                if (scaledRoundGain != roundGain)
+                    sb.AppendLine($"Difficulty/encounter scaling adjusted round gain from {roundGain} to {scaledRoundGain}.");
+                sb.AppendLine($"Round money gain: +{scaledRoundGain}.");
             }
 
             return sb.ToString().TrimEnd();

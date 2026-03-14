@@ -2,6 +2,9 @@ using Game.Core.Models;
 
 namespace Game.Core.Effects.Implementations
 {
+    /// <summary>
+    /// Generic permanent-or-temporary stack adder used by simple status cards.
+    /// </summary>
     public class AddStacksEffect : IEffect
     {
         public EffectTrigger Trigger => EffectTrigger.OnPlay;
@@ -24,6 +27,9 @@ namespace Game.Core.Effects.Implementations
         }
     }
 
+    /// <summary>
+    /// Caps Buy Low at two stacks so cost reduction remains strong but controlled.
+    /// </summary>
     public class BuyLowStackEffect : IEffect
     {
         public EffectTrigger Trigger => EffectTrigger.OnPlay;
@@ -39,6 +45,9 @@ namespace Game.Core.Effects.Implementations
         }
     }
 
+    /// <summary>
+    /// Caps Sell High at two stacks for the same pacing reason as Buy Low.
+    /// </summary>
     public class SellHighStackEffect : IEffect
     {
         public EffectTrigger Trigger => EffectTrigger.OnPlay;
@@ -54,6 +63,9 @@ namespace Game.Core.Effects.Implementations
         }
     }
 
+    /// <summary>
+    /// Immediate money spike that schedules a debt repayment a couple of turns later.
+    /// </summary>
     public class LoanSharkEffect : IEffect
     {
         public EffectTrigger Trigger => EffectTrigger.OnPlay;
@@ -67,6 +79,9 @@ namespace Game.Core.Effects.Implementations
         }
     }
 
+    /// <summary>
+    /// Adds another volatility stack to the end-of-round market roll.
+    /// </summary>
     public class StocksAndBondsStackEffect : IEffect
     {
         public EffectTrigger Trigger => EffectTrigger.OnPlay;
@@ -78,6 +93,9 @@ namespace Game.Core.Effects.Implementations
         }
     }
 
+    /// <summary>
+    /// Delays an economy payoff to the following round.
+    /// </summary>
     public class CryptoEffect : IEffect
     {
         public EffectTrigger Trigger => EffectTrigger.OnPlay;
@@ -89,6 +107,9 @@ namespace Game.Core.Effects.Implementations
         }
     }
 
+    /// <summary>
+    /// Permanently boosts the player's baseline round-income value by a random amount.
+    /// </summary>
     public class RealEstateEffect : IEffect
     {
         public EffectTrigger Trigger => EffectTrigger.OnPlay;

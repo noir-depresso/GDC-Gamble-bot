@@ -9,11 +9,13 @@ using Game.Core.Sessions;
 
 namespace DiscordBot.Application
 {
+    // Application-layer coordinator that turns Discord commands into validated engine actions.
     public class GameService
     {
         private const int DuelChallengeTimeoutMinutes = 10;
         private const int DuelWinsToFinish = 3;
 
+        // Runtime-only duel metadata. This lives beside the command service because it is channel/session orchestration data.
         private sealed class DuelState
         {
             public ulong ChallengerUserId { get; init; }
@@ -27,16 +29,24 @@ namespace DiscordBot.Application
             public Dictionary<ulong, int> RoundWins { get; } = new();
         }
 
+        // Runtime meta profile cache used until persistent profile storage is introduced.
+        private sealed record MetaProgress(int MetaCredits, int LifetimeMetaCredits, int UnlockTier, int RunsCompleted, int RunsFailed);
+
         private readonly IGameRepo _repo;
         private readonly GameLockProvider _lockProvider;
         private readonly ConcurrentDictionary<ulong, DuelState> _duelsByChannel = new();
+        private readonly ConcurrentDictionary<ulong, DeckComposition> _deckPreferencesByUser = new();
+        private readonly ConcurrentDictionary<ulong, int> _difficultyPreferencesByUser = new();
+        private readonly ConcurrentDictionary<ulong, MetaProgress> _metaProgressByUser = new();
 
+        // The service depends on persistence and per-channel locking, but keeps Discord types out of the engine.
         public GameService(IGameRepo repo, GameLockProvider lockProvider)
         {
             _repo = repo;
             _lockProvider = lockProvider;
         }
 
+        // Main command pipeline: normalize -> load -> validate actor -> execute -> persist -> format replies.
         public async Task<GameServiceResult> HandleCommandAsync(
             ulong channelId,
             ulong userId,
@@ -54,12 +64,14 @@ namespace DiscordBot.Application
                 return result;
             }
 
+            // Lightweight commands that do not need a loaded session return early.
             if (normalized == "help")
             {
-                result.Messages.Add("**Commands**\n`!newgame` `!duel <@user|userId>` `!accept` `!decline` `!cancelduel` `!rematch` `!forfeit` `!kit <thief|politician>` `!bet <amount>` `!play <index>` `!end` `!choose <choiceId> <option>` `!useitem <index>` `!inspect <index>` `!job <cleaning|fetch|delivery|snake|coinflip>` `!nextcombat` `!status` `!hand` `!help`\nSlash: `/game create|kit|bet|play|end|choose|useitem|inspect|job|nextcombat|status|hand|help`");
+                result.Messages.Add("**Commands**\n`!newgame` `!duel <@user|userId>` `!accept` `!decline` `!cancelduel` `!rematch` `!forfeit` `!kit <thief|politician>` `!deck <bruiser> <medicate> <investment>` `!difficulty <1-5>` `!bet <amount>` `!play <index>` `!end` `!choose <choiceId> <option>` `!packet <convert|credit|bank>` `!useitem <index>` `!inspect <index>` `!job <cleaning|fetch|delivery|snake|coinflip>` `!nextcombat` `!status` `!meta` `!hand` `!help`\nSlash: `/game create|kit|deck|difficulty|bet|play|end|choose|useitem|inspect|job|nextcombat|status|hand|help`");
                 return result;
             }
 
+            // Commands for the same channel are serialized so duplicate Discord events cannot interleave writes.
             await using var guard = await _lockProvider.AcquireAsync(channelId, ct);
 
             var persisted = await _repo.LoadByChannelAsync(channelId, ct);
@@ -70,12 +82,122 @@ namespace DiscordBot.Application
             }
 
             GameSession? session = persisted == null ? null : GameSession.Restore(channelId, persisted.OwnerUserId, persisted.State);
+            if (session?.GetStateSnapshot() is GameState restoredState)
+                SyncMetaProfileFromState(session.OwnerUserId, restoredState);
             _duelsByChannel.TryGetValue(channelId, out var duel);
 
             if (duel != null && !duel.IsActive && DateTime.UtcNow - duel.CreatedAtUtc > TimeSpan.FromMinutes(DuelChallengeTimeoutMinutes))
             {
                 _duelsByChannel.TryRemove(channelId, out _);
                 duel = null;
+            }
+
+            // Preference commands are allowed even when no active game exists yet.
+            if (normalized == "deck")
+            {
+                if (args.Length < 3)
+                {
+                    if (_deckPreferencesByUser.TryGetValue(userId, out var current))
+                    {
+                        result.Messages.Add($"Current deck preference: bruiser={current.BruiserCount}, medicate={current.MedicateCount}, investment={current.InvestmentCount}, special={current.SpecialCount}.");
+                    }
+                    else
+                    {
+                        result.Messages.Add("No deck preference saved yet. Usage: `!deck <bruiser> <medicate> <investment>`.");
+                    }
+
+                    return result;
+                }
+
+                if (!TryParseDeckPreference(args, out var preference, out var parseError))
+                {
+                    result.Messages.Add(parseError);
+                    return result;
+                }
+
+                _deckPreferencesByUser[userId] = preference;
+                result.Messages.Add($"Saved deck preference for <@{userId}>: bruiser={preference.BruiserCount}, medicate={preference.MedicateCount}, investment={preference.InvestmentCount}, special={preference.SpecialCount}.");
+                result.Messages.Add("Use `!newgame` to apply this immediately, or it will apply next time your game starts.");
+                return result;
+            }
+
+            // Difficulty can be queried, saved for later, or applied to the live session.
+            if (normalized == "difficulty")
+            {
+                int currentPreference = GetPreferredDifficultyForUser(userId);
+                if (args.Length == 0)
+                {
+                    result.Messages.Add($"Current difficulty preference: **{currentPreference}** (default is {GameState.DefaultDifficultyLevel}).");
+                    result.Messages.Add(GameState.DifficultyIntentDescription(currentPreference));
+                    if (session != null && session.IsInitialized && session.HasGame)
+                    {
+                        result.Messages.Add($"Active game difficulty: **{session.DifficultyLevel}**.");
+                        result.Messages.Add(GameState.DifficultyIntentDescription(session.DifficultyLevel));
+                    }
+                    return result;
+                }
+
+                if (!TryParseDifficulty(args[0], out int difficulty, out string difficultyError))
+                {
+                    result.Messages.Add(difficultyError);
+                    return result;
+                }
+
+                _difficultyPreferencesByUser[userId] = difficulty;
+
+                if (session != null && session.IsInitialized && session.HasGame)
+                {
+                    bool canApply = duel?.IsActive == true
+                        ? IsDuelParticipant(duel, userId)
+                        : session.OwnerUserId == userId;
+
+                    if (canApply)
+                    {
+                        result.Messages.Add(session.SetDifficulty(difficulty));
+                        result.Messages.Add(GameState.DifficultyIntentDescription(difficulty));
+                        await SaveSessionAsync(session, persisted!.GameId, persisted.CreatedAtUtc, interactionId, ct);
+                        result.Messages.Add(session.StatusText());
+                    }
+                    else
+                    {
+                        result.Messages.Add($"Saved difficulty preference **{difficulty}**. It will apply when you start your own game.");
+                    }
+                }
+                else
+                {
+                    result.Messages.Add($"Saved difficulty preference **{difficulty}**. Use `!newgame` to apply now.");
+                }
+
+                return result;
+            }
+
+            // Meta profile is exposed as a quick progression summary without requiring combat UI reading.
+            if (normalized == "meta")
+            {
+                if (session != null && session.IsInitialized && session.HasGame && session.OwnerUserId == userId)
+                {
+                    var state = session.GetStateSnapshot();
+                    if (state != null)
+                    {
+                        result.Messages.Add($"Meta profile: current={state.MetaCredits}, lifetime={state.LifetimeMetaCredits}, tier={state.UnlockTier}, runs={state.RunsCompleted} completed / {state.RunsFailed} failed.");
+                        if (state.NextUnlockTier > 0)
+                            result.Messages.Add($"Next tier {state.NextUnlockTier} in {state.CreditsToNextUnlock} lifetime meta credits.");
+                        else
+                            result.Messages.Add("Unlock track complete: max tier reached.");
+                        return result;
+                    }
+                }
+
+                if (_metaProgressByUser.TryGetValue(userId, out var metaProfile))
+                {
+                    result.Messages.Add($"Meta profile: current={metaProfile.MetaCredits}, lifetime={metaProfile.LifetimeMetaCredits}, tier={metaProfile.UnlockTier}, runs={metaProfile.RunsCompleted} completed / {metaProfile.RunsFailed} failed.");
+                }
+                else
+                {
+                    result.Messages.Add("Meta profile: no progress recorded yet. Play combats to earn meta credits.");
+                }
+
+                return result;
             }
 
             if (normalized == "duel")
@@ -170,7 +292,7 @@ namespace DiscordBot.Application
                 duel.RoundWins[duel.ChallengerUserId] = 0;
                 duel.RoundWins[duel.ChallengedUserId] = 0;
 
-                session.StartNewGame(duel.CurrentTurnUserId);
+                StartNewGameForUser(session, duel.CurrentTurnUserId);
                 ApplyPreferredClassForUser(session, duel, duel.CurrentTurnUserId, result);
 
                 await SaveSessionAsync(session, persisted?.GameId ?? Guid.NewGuid(), persisted?.CreatedAtUtc, interactionId, ct);
@@ -204,7 +326,7 @@ namespace DiscordBot.Application
                 duel.CurrentTurnUserId = duel.LastWinnerUserId ?? duel.ChallengerUserId;
 
                 session ??= new GameSession(channelId);
-                session.StartNewGame(duel.CurrentTurnUserId);
+                StartNewGameForUser(session, duel.CurrentTurnUserId);
                 ApplyPreferredClassForUser(session, duel, duel.CurrentTurnUserId, result);
 
                 await SaveSessionAsync(session, persisted?.GameId ?? Guid.NewGuid(), persisted?.CreatedAtUtc, interactionId, ct);
@@ -236,6 +358,7 @@ namespace DiscordBot.Application
                 return result;
             }
 
+            // New game startup is also used as the reset path for solo runs and duel rounds.
             if (normalized == "newgame")
             {
                 if (duel?.IsActive == true && !IsDuelParticipant(duel, userId))
@@ -245,7 +368,7 @@ namespace DiscordBot.Application
                 }
 
                 session = new GameSession(channelId);
-                session.StartNewGame(userId);
+                StartNewGameForUser(session, userId);
 
                 if (duel?.IsActive == true)
                 {
@@ -269,9 +392,11 @@ namespace DiscordBot.Application
 
             bool isDuelActive = duel?.IsActive == true;
             bool isParticipant = duel != null && IsDuelParticipant(duel, userId);
+            // Only a subset of commands should be restricted to the current duel turn owner.
             bool isTurnLockedCommand =
                 normalized == "bet" ||
                 normalized == "choose" ||
+                normalized == "packet" ||
                 normalized == "useitem" ||
                 normalized == "job" ||
                 normalized == "nextcombat" ||
@@ -378,11 +503,32 @@ namespace DiscordBot.Application
                 return result;
             }
 
+
+            if (normalized == "packet")
+            {
+                if (args.Length < 1)
+                {
+                    result.Messages.Add("Usage: `!packet <convert|credit|bank>`");
+                    return result;
+                }
+
+                var state = session.GetStateSnapshot();
+                if (state?.PendingChoice == null || !string.Equals(state.PendingChoice.ChoiceType, "INTERMISSION_PACKET", StringComparison.Ordinal))
+                {
+                    result.Messages.Add("No intermission packet is pending right now.");
+                    return result;
+                }
+
+                result.Messages.Add(session.Choose(state.PendingChoice.ChoiceId, args[0]));
+                await SaveSessionAsync(session, persisted!.GameId, persisted.CreatedAtUtc, interactionId, ct);
+                result.Messages.Add(session.StatusText());
+                return result;
+            }
             if (normalized == "choose")
             {
                 if (args.Length < 2)
                 {
-                    result.Messages.Add("Usage: `!choose <choiceId> <option>`");
+                    result.Messages.Add("Usage: `!choose <choiceId> <option>` `!packet <convert|credit|bank>`");
                     return result;
                 }
 
@@ -470,6 +616,7 @@ namespace DiscordBot.Application
             return result;
         }
 
+        // Duel mode treats each completed combat as one round in a best-of series.
         private async Task ResolveDuelRoundIfNeededAsync(
             GameSession session,
             PersistedGame persisted,
@@ -500,7 +647,7 @@ namespace DiscordBot.Application
             }
 
             duel.CurrentTurnUserId = winner;
-            session.StartNewGame(winner);
+            StartNewGameForUser(session, winner);
             ApplyPreferredClassForUser(session, duel, winner, result);
             await SaveSessionAsync(session, persisted.GameId, persisted.CreatedAtUtc, interactionId, ct);
 
@@ -509,6 +656,7 @@ namespace DiscordBot.Application
             result.Messages.Add(session.HandText());
         }
 
+        // Small alias layer for ergonomic text commands.
         private static string NormalizeCommand(string command)
         {
             return command.ToLowerInvariant() switch
@@ -517,20 +665,24 @@ namespace DiscordBot.Application
                 "next" => "nextcombat",
                 "cancel" => "cancelduel",
                 "resign" => "forfeit",
+                "pkt" => "packet",
                 _ => command.ToLowerInvariant()
             };
         }
 
+        // Utility guard used throughout duel validation paths.
         private static bool IsDuelParticipant(DuelState duel, ulong userId)
         {
             return userId == duel.ChallengerUserId || userId == duel.ChallengedUserId;
         }
 
+        // Resolves the other player in a two-person duel.
         private static ulong OpponentUserId(DuelState duel, ulong userId)
         {
             return userId == duel.ChallengerUserId ? duel.ChallengedUserId : duel.ChallengerUserId;
         }
 
+        // Character parsing stays forgiving so minor input differences do not block play.
         private static CharacterClass ParseCharacterClass(string raw)
         {
             return string.Equals(raw, "politician", StringComparison.OrdinalIgnoreCase)
@@ -538,11 +690,13 @@ namespace DiscordBot.Application
                 : CharacterClass.Thief;
         }
 
+        // Duel participants each keep their own preferred class between rounds.
         private static CharacterClass GetPreferredClassForUser(DuelState duel, ulong userId)
         {
             return userId == duel.ChallengerUserId ? duel.ChallengerClass : duel.ChallengedClass;
         }
 
+        // Writes a duel participant's preferred class back into the duel state.
         private static void SetPreferredClassForUser(DuelState duel, ulong userId, CharacterClass cls)
         {
             if (userId == duel.ChallengerUserId)
@@ -551,12 +705,101 @@ namespace DiscordBot.Application
                 duel.ChallengedClass = cls;
         }
 
+        // Applies the stored class preference to the active session and forwards the engine message to the user.
         private static void ApplyPreferredClassForUser(GameSession session, DuelState duel, ulong userId, GameServiceResult result)
         {
             var cls = GetPreferredClassForUser(duel, userId);
             result.Messages.Add(session.SelectCharacter(cls));
         }
 
+        // Centralized run startup so difficulty, deck preference, and meta profile are always applied together.
+        private void StartNewGameForUser(GameSession session, ulong userId)
+        {
+            _deckPreferencesByUser.TryGetValue(userId, out var deckPreference);
+            session.StartNewGame(userId, deckPreference);
+            session.SetDifficulty(GetPreferredDifficultyForUser(userId));
+            ApplyMetaProfileToSession(userId, session);
+        }
+
+
+
+        // Reads the saved difficulty preference or falls back to the global default.
+        private int GetPreferredDifficultyForUser(ulong userId)
+        {
+            return _difficultyPreferencesByUser.TryGetValue(userId, out int difficulty)
+                ? GameState.ClampDifficultyLevel(difficulty)
+                : GameState.DefaultDifficultyLevel;
+        }
+
+        // Rehydrates runtime meta progression into a newly created session snapshot.
+        private void ApplyMetaProfileToSession(ulong userId, GameSession session)
+        {
+            if (!_metaProgressByUser.TryGetValue(userId, out var profile)) return;
+            var state = session.GetStateSnapshot();
+            if (state == null) return;
+
+
+            state.MetaCredits = Math.Max(0, profile.MetaCredits);
+            state.LifetimeMetaCredits = Math.Max(0, profile.LifetimeMetaCredits);
+            state.UnlockTier = GameState.UnlockTierFromLifetimeMetaCredits(state.LifetimeMetaCredits);
+            state.RunsCompleted = Math.Max(0, profile.RunsCompleted);
+            state.RunsFailed = Math.Max(0, profile.RunsFailed);
+        }
+
+        // Persists the latest meta-profile fields in memory whenever a session snapshot changes.
+        private void SyncMetaProfileFromState(ulong userId, GameState state)
+        {
+            _metaProgressByUser[userId] = new MetaProgress(
+                Math.Max(0, state.MetaCredits),
+                Math.Max(0, state.LifetimeMetaCredits),
+                GameState.UnlockTierFromLifetimeMetaCredits(state.LifetimeMetaCredits),
+                Math.Max(0, state.RunsCompleted),
+                Math.Max(0, state.RunsFailed));
+        }
+
+        // Validates the public 1-5 difficulty command contract.
+        private static bool TryParseDifficulty(string raw, out int difficulty, out string error)
+        {
+            error = string.Empty;
+            if (!int.TryParse(raw, out difficulty))
+            {
+                error = "Usage: `!difficulty <1-5>`.";
+                return false;
+            }
+
+            if (difficulty < GameState.MinDifficultyLevel || difficulty > GameState.MaxDifficultyLevel)
+            {
+                error = $"Difficulty must be between {GameState.MinDifficultyLevel} and {GameState.MaxDifficultyLevel}.";
+                return false;
+            }
+
+            return true;
+        }
+        // Parses the deck-type preference tuple used by !deck and /game deck.
+        private static bool TryParseDeckPreference(string[] args, out DeckComposition preference, out string error)
+        {
+            preference = new DeckComposition(0, 0, 0);
+            error = string.Empty;
+
+            if (!int.TryParse(args[0], out int bruiser) || !int.TryParse(args[1], out int medicate) || !int.TryParse(args[2], out int investment))
+            {
+                error = "Usage: `!deck <bruiser> <medicate> <investment>` (all values must be integers).";
+                return false;
+            }
+
+            try
+            {
+                preference = new DeckComposition(bruiser, medicate, investment);
+                return true;
+            }
+            catch (ArgumentOutOfRangeException)
+            {
+                error = "Invalid deck counts. Values must be >= 0 and sum to 32 or less.";
+                return false;
+            }
+        }
+
+        // Accepts either raw ids or Discord mention syntax for duel commands.
         private static bool TryParseUserId(string raw, out ulong userId)
         {
             userId = 0;
@@ -576,11 +819,13 @@ namespace DiscordBot.Application
             return ulong.TryParse(value, out userId);
         }
 
+        // Saves the latest session snapshot and updates the in-memory meta profile cache in one place.
         private async Task SaveSessionAsync(GameSession session, Guid gameId, DateTime? createdAtUtc, string interactionId, CancellationToken ct)
         {
             var state = session.GetStateSnapshot();
             if (state == null) return;
 
+            SyncMetaProfileFromState(session.OwnerUserId, state);
             await _repo.SaveAsync(new PersistedGame
             {
                 GameId = gameId,
@@ -594,3 +839,11 @@ namespace DiscordBot.Application
         }
     }
 }
+
+
+
+
+
+
+
+

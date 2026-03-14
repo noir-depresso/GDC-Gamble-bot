@@ -3,6 +3,7 @@ using Game.Core.Models;
 
 namespace DiscordBot.Persistence
 {
+    // Storage envelope for a whole saved game plus metadata used by the bot layer.
     public class PersistedGame
     {
         public Guid GameId { get; set; }

@@ -7,17 +7,25 @@ using DiscordBot.Application;
 
 namespace DiscordBot.Discord
 {
+    /// <summary>
+    /// Thin Discord transport layer that translates Discord events into game-service calls.
+    /// It keeps Discord-specific concerns here so the rest of the game logic can stay platform-agnostic.
+    /// </summary>
     public class BotClient
     {
         private readonly BotConfig _config;
         private readonly DiscordSocketClient _client;
         private readonly GameService _gameService;
 
+        /// <summary>
+        /// Builds the socket client and wires the handful of events the bot cares about.
+        /// </summary>
         public BotClient(BotConfig config, GameService gameService)
         {
             _config = config;
             _gameService = gameService;
 
+            // The bot only needs guild slash commands, normal messages, and message content for prefix commands.
             var socketConfig = new DiscordSocketConfig
             {
                 GatewayIntents =
@@ -33,18 +41,27 @@ namespace DiscordBot.Discord
             _client.SlashCommandExecuted += OnSlashCommandExecutedAsync;
         }
 
+        /// <summary>
+        /// Logs in and starts the long-running Discord socket connection.
+        /// </summary>
         public async Task StartAsync()
         {
             await _client.LoginAsync(TokenType.Bot, _config.Token);
             await _client.StartAsync();
         }
 
+        /// <summary>
+        /// Runs once Discord says the socket is ready, then refreshes slash commands.
+        /// </summary>
         private async Task OnReadyAsync()
         {
             Console.WriteLine($"Online as {_client.CurrentUser}");
             await RegisterCommandsAsync();
         }
 
+        /// <summary>
+        /// Registers the current slash-command surface in one place so Discord stays in sync with the game service.
+        /// </summary>
         private async Task RegisterCommandsAsync()
         {
             var game = new SlashCommandBuilder()
@@ -53,6 +70,12 @@ namespace DiscordBot.Discord
                 .AddOption(new SlashCommandOptionBuilder().WithName("create").WithDescription("Create/start a new game").WithType(ApplicationCommandOptionType.SubCommand))
                 .AddOption(new SlashCommandOptionBuilder().WithName("kit").WithDescription("Select character kit").WithType(ApplicationCommandOptionType.SubCommand)
                     .AddOption("name", ApplicationCommandOptionType.String, "thief or politician", isRequired: true))
+                .AddOption(new SlashCommandOptionBuilder().WithName("deck").WithDescription("Set deck composition counts").WithType(ApplicationCommandOptionType.SubCommand)
+                    .AddOption("bruiser", ApplicationCommandOptionType.Integer, "Bruiser cards count", isRequired: true)
+                    .AddOption("medicate", ApplicationCommandOptionType.Integer, "Medicate cards count", isRequired: true)
+                    .AddOption("investment", ApplicationCommandOptionType.Integer, "Investment cards count", isRequired: true))
+                .AddOption(new SlashCommandOptionBuilder().WithName("difficulty").WithDescription("Set game difficulty (1-5, default 3)").WithType(ApplicationCommandOptionType.SubCommand)
+                    .AddOption("level", ApplicationCommandOptionType.Integer, "Difficulty level", isRequired: true))
                 .AddOption(new SlashCommandOptionBuilder().WithName("bet").WithDescription("Place pre-fight bet").WithType(ApplicationCommandOptionType.SubCommand)
                     .AddOption("amount", ApplicationCommandOptionType.Integer, "Bet amount (1-1000)", isRequired: true))
                 .AddOption(new SlashCommandOptionBuilder().WithName("choose").WithDescription("Resolve pending choice").WithType(ApplicationCommandOptionType.SubCommand)
@@ -75,6 +98,9 @@ namespace DiscordBot.Discord
             await _client.BulkOverwriteGlobalApplicationCommandsAsync(new ApplicationCommandProperties[] { game.Build() });
         }
 
+        /// <summary>
+        /// Handles classic prefix commands and streams all resulting response lines back into the channel.
+        /// </summary>
         private async Task OnMessageReceivedAsync(SocketMessage rawMsg)
         {
             if (rawMsg is not SocketUserMessage msg) return;
@@ -88,6 +114,10 @@ namespace DiscordBot.Discord
                 await msg.Channel.SendMessageAsync(line);
         }
 
+        /// <summary>
+        /// Normalizes slash subcommands into the same command/arg shape used by text commands.
+        /// This keeps GameService as the single source of truth for behavior.
+        /// </summary>
         private async Task OnSlashCommandExecutedAsync(SocketSlashCommand cmd)
         {
             if (!string.Equals(cmd.CommandName, "game", StringComparison.OrdinalIgnoreCase))
@@ -106,7 +136,8 @@ namespace DiscordBot.Discord
             string command = sub.Name;
             string[] args = Array.Empty<string>();
 
-            if (command is "play" or "bet" or "useitem" or "inspect")
+            // Slash options are richer than prefix commands, so we flatten them into string args here.
+            if (command is "play" or "bet" or "useitem" or "inspect" or "difficulty")
             {
                 if (sub.Options.Count == 0)
                 {
@@ -119,6 +150,19 @@ namespace DiscordBot.Discord
             else if (command is "kit" or "job")
             {
                 args = new[] { sub.Options.First().Value?.ToString() ?? string.Empty };
+            }
+            else if (command == "deck")
+            {
+                if (sub.Options.Count < 3)
+                {
+                    await cmd.RespondAsync("Need `bruiser`, `medicate`, and `investment`.", ephemeral: true);
+                    return;
+                }
+
+                string bruiser = sub.Options.First(o => o.Name == "bruiser").Value?.ToString() ?? string.Empty;
+                string medicate = sub.Options.First(o => o.Name == "medicate").Value?.ToString() ?? string.Empty;
+                string investment = sub.Options.First(o => o.Name == "investment").Value?.ToString() ?? string.Empty;
+                args = new[] { bruiser, medicate, investment };
             }
             else if (command == "choose")
             {
@@ -147,4 +191,3 @@ namespace DiscordBot.Discord
         }
     }
 }
-

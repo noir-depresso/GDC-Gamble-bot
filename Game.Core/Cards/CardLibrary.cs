@@ -6,8 +6,15 @@ using Game.Core.Models;
 
 namespace Game.Core.Cards
 {
+    /// <summary>
+    /// Central lookup table for every card currently supported by the prototype.
+    /// The engine asks this library for immutable card definitions by id whenever it needs card data.
+    /// </summary>
     public static class CardLibrary
     {
+        /// <summary>
+        /// Returns the default 32-card starter deck before per-player deck composition overrides are applied.
+        /// </summary>
         public static List<string> StarterDeckCardIds()
         {
             return new List<string>
@@ -19,6 +26,10 @@ namespace Game.Core.Cards
             };
         }
 
+        /// <summary>
+        /// Materializes a fresh card definition from its stable id.
+        /// Fresh instances are fine here because card definitions are small and immutable in practice.
+        /// </summary>
         public static CardDef GetById(string id)
         {
             return id switch
@@ -72,6 +83,7 @@ namespace Game.Core.Cards
             };
         }
 
+        // Investment cards mainly shape the long-term combat economy.
         private static CardDef CreateBankAccount() => new("BANK", "Bank Account", CardType.Investment,
             "Increase 5% of basic income gained every round (stacks).", 25,
             new List<IEffect> { new AddStacksEffect(EffectIds.BANK_ACCOUNT, 1, -1) });
@@ -100,6 +112,7 @@ namespace Game.Core.Cards
             "Increase base income by a random amount.", 50,
             new List<IEffect> { new RealEstateEffect() });
 
+        // Medicate cards are mostly sustain, setup, and utility tools.
         private static CardDef CreateRaan() => new("RAAN", "Raan", CardType.Medicate,
             "After 2-3 turns, draw an extra card.", 50,
             new List<IEffect> { new RaanEffect() });
@@ -184,6 +197,7 @@ namespace Game.Core.Cards
             "Builds random item over 2 turns.", 225,
             new List<IEffect> { new SpiderAndroidsEffect() });
 
+        // Bruiser cards are the direct-pressure tools that close fights.
         private static CardDef CreateWire() => new("WIRE", "The Wire", CardType.Bruiser,
             "Deal 10 damage. If this kills, gain extra draw after combat.", 50,
             new List<IEffect> { new DealDamageEffect(10) });
@@ -224,6 +238,7 @@ namespace Game.Core.Cards
             "If attacked next turn, deal 50 back; else heal 15.", 125,
             new List<IEffect> { new TraumaTeamEffect() });
 
+        // Specials are mostly oddball or future-facing mechanics.
         private static CardDef CreateRoulette() => new("ROULETTE", "Roulette", CardType.Special,
             "Chance effect: self-damage/heal/enemy damage.", 50,
             new List<IEffect> { new RouletteEffect() });

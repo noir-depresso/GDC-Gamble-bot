@@ -4,6 +4,9 @@ using Game.Core.Models;
 
 namespace Game.Core.Effects.Implementations
 {
+    /// <summary>
+    /// Placeholder effect used when a card is intentionally present in the library but not implemented yet.
+    /// </summary>
     public class NoOpEffect : IEffect
     {
         public EffectTrigger Trigger => EffectTrigger.OnPlay;
@@ -17,6 +20,9 @@ namespace Game.Core.Effects.Implementations
         public string Apply(EffectContext ctx) => _message;
     }
 
+    /// <summary>
+    /// Creates a follow-up choice instead of resolving immediately.
+    /// </summary>
     public class PersuasionEffect : IEffect
     {
         public EffectTrigger Trigger => EffectTrigger.OnPlay;
@@ -35,6 +41,9 @@ namespace Game.Core.Effects.Implementations
         }
     }
 
+    /// <summary>
+    /// Stubs in a tactical-information choice until the richer information systems are expanded.
+    /// </summary>
     public class DdosEffect : IEffect
     {
         public EffectTrigger Trigger => EffectTrigger.OnPlay;
@@ -53,6 +62,9 @@ namespace Game.Core.Effects.Implementations
         }
     }
 
+    /// <summary>
+    /// Creates a card-type block choice for both sides.
+    /// </summary>
     public class ScapeGoatEffect : IEffect
     {
         public EffectTrigger Trigger => EffectTrigger.OnPlay;
@@ -71,6 +83,9 @@ namespace Game.Core.Effects.Implementations
         }
     }
 
+    /// <summary>
+    /// Turns Expose into a two-step action because the sacrifice target comes from the current hand.
+    /// </summary>
     public class ExposeEffect : IEffect
     {
         public EffectTrigger Trigger => EffectTrigger.OnPlay;

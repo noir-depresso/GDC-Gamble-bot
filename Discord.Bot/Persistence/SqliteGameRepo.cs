@@ -10,6 +10,10 @@ using Microsoft.Data.Sqlite;
 
 namespace DiscordBot.Persistence
 {
+    /// <summary>
+    /// SQLite-backed persistence store for one active session per channel.
+    /// The repo keeps serialization and schema concerns away from the game service.
+    /// </summary>
     public class SqliteGameRepo : IGameRepo
     {
         private readonly string _dbPath;
@@ -20,6 +24,9 @@ namespace DiscordBot.Persistence
         private volatile bool _initialized;
         private readonly SemaphoreSlim _initLock = new(1, 1);
 
+        /// <summary>
+        /// Prepares the repo around a single sqlite file path and the state migrator used for legacy saves.
+        /// </summary>
         public SqliteGameRepo(string dbPath)
         {
             _dbPath = dbPath;
@@ -28,6 +35,9 @@ namespace DiscordBot.Persistence
             _migrator = new GameStateMigrator();
         }
 
+        /// <summary>
+        /// Loads the active game for a channel, migrates old state forward, and returns null if no session exists.
+        /// </summary>
         public async Task<PersistedGame?> LoadByChannelAsync(ulong channelId, CancellationToken ct)
         {
             await EnsureInitializedAsync(ct);
@@ -71,6 +81,9 @@ LIMIT 1;";
             };
         }
 
+        /// <summary>
+        /// Upserts both the session metadata row and the serialized game-state row in a single transaction.
+        /// </summary>
         public async Task SaveAsync(PersistedGame game, CancellationToken ct)
         {
             await EnsureInitializedAsync(ct);
@@ -129,6 +142,9 @@ ON CONFLICT(GameId) DO UPDATE SET
             await tx.CommitAsync(ct);
         }
 
+        /// <summary>
+        /// Deletes the active session for a channel. Cascading cleanup removes the matching state row.
+        /// </summary>
         public async Task DeleteByChannelAsync(ulong channelId, CancellationToken ct)
         {
             await EnsureInitializedAsync(ct);
@@ -142,6 +158,10 @@ ON CONFLICT(GameId) DO UPDATE SET
             await cmd.ExecuteNonQueryAsync(ct);
         }
 
+        /// <summary>
+        /// Lazily creates the sqlite file and schema the first time the repo is touched.
+        /// The lock keeps startup races from creating the schema more than once.
+        /// </summary>
         private async Task EnsureInitializedAsync(CancellationToken ct)
         {
             if (_initialized) return;
@@ -186,6 +206,7 @@ CREATE TABLE IF NOT EXISTS GameStates (
                     await cmd.ExecuteNonQueryAsync(ct);
                 }
 
+                // Old databases may predate LastInteractionId, so this best-effort ALTER keeps upgrades painless.
                 await using (var alterCmd = conn.CreateCommand())
                 {
                     alterCmd.CommandText = "ALTER TABLE Sessions ADD COLUMN LastInteractionId TEXT NOT NULL DEFAULT '';";
